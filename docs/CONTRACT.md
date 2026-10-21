@@ -14,8 +14,8 @@ Source of truth: `athens-transit-rt/docs/CONTRACT.md`. The frontend keeps a copy
   frontend repo by whoever made it (backend thread opens the copy as a commit or
   issue on the frontend repo).
 
-Revision: 5 (2026-10-08): `GET /v1/vehicles/tiles/{z}/{x}/{y}` (vehicles of the map view)
-(rev 4: `path_beyond` and `path_stops` on vehicles; rev 3: `GET /v1/vehicles`; `speed` and
+Revision: 6 (2026-10-21): `path_speeds` on vehicles (typical speeds ahead)
+(rev 5: `GET /v1/vehicles/tiles/{z}/{x}/{y}`; rev 4: `path_beyond` and `path_stops` on vehicles; rev 3: `GET /v1/vehicles`; `speed` and
 `path` on vehicles)
 
 ## Hosts
@@ -59,7 +59,8 @@ The frontend combines lines in the browser. Max 5 lines per client (enforced in 
       "speed": 6.4,
       "path": [[37.9755, 23.7348], [37.97601, 23.73502], [37.9781, 23.7356]],
       "path_beyond": [[37.9781, 23.7356], [37.98145, 23.73668], [37.98466, 23.73771]],
-      "path_stops": [298, 682, 1050]
+      "path_stops": [298, 682, 1050],
+      "path_speeds": [6.2, 3.1, 4.8, 5.5, null, 7.0, 6.1, 5.9]
     }
   ]
 }
@@ -93,6 +94,17 @@ The frontend combines lines in the browser. Max 5 lines per client (enforced in 
   `path`. `null` when not matched or no stop is on them. Use (rev 4 clients): drive
   `path` then `path_beyond` from `position_at`, slowing down and waiting a little at each
   of `path_stops`.
+- `path_speeds` (rev 6): matched vehicles only, the typical speed ahead in m/s (one decimal,
+  at least 0.1) for consecutive 200 m steps from the vehicle's point along its shape: step `i`
+  covers metres `200·i` to `200·(i+1)` ahead, the last one may be shorter (shape's end), at
+  most 8 steps (1.6 km). It comes from the last 14 days of fixes of vehicles on the same shape,
+  per 200 m of the shape, day type (weekday, Saturday, Sunday) and local hour, falling back to
+  all hours; waits at stops and lights are included. A step with no history is `null`. `null`
+  when unmatched, waiting to start, the backend runs without fix history, or nothing ahead is
+  known. Use (rev 6 clients): move along `path` then `path_beyond` from `position_at` at
+  the step speeds (a `null` step at `speed`, or 1.5 m/s without one), instead of the stop
+  waits; stop at the end of the points, as before. Metres are along the shape; the 5 m
+  simplified points are a few metres shorter, so a client may simply walk them.
 - Headers: `Cache-Control: public, max-age=<seconds until next_update_at, min 5, max 300>`.
   The frontend refetches a line at `next_update_at + 1..3 s` (random jitter), never faster
   than every 5 s, and at most every 60 s while the tab is hidden.
@@ -125,7 +137,8 @@ to ~2.5 min staler than `/v1/lines/{id}` for lines nobody watches.
       "speed": 6.4,
       "path": [[37.9755, 23.7348], [37.9781, 23.7356]],
       "path_beyond": [[37.9781, 23.7356], [37.98466, 23.73771]],
-      "path_stops": [297, 1049]
+      "path_stops": [297, 1049],
+      "path_speeds": [6.2, 3.1, 4.8, null]
     }
   ]
 }
@@ -153,7 +166,7 @@ Example: `/v1/vehicles/tiles/13/4636/3160` (around Syntagma).
 
 | `z` | tile size (Athens) | content | use at MapLibre zoom |
 |---|---|---|---|
-| `9` | ~62 km | vehicles without `path`, `path_beyond`, `path_stops` (the keys are absent) | < 13 |
+| `9` | ~62 km | vehicles without `path`, `path_beyond`, `path_stops`, `path_speeds` (the keys are absent) | < 13 |
 | `13` | ~3.9 km | the same vehicle entries as `/v1/vehicles` | ≥ 13 |
 
 ```json

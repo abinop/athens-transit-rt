@@ -105,13 +105,15 @@ percent-encoded. Latin look-alikes also work (`A1` → `Α1`).
   `path` is the route ahead as `[lat, lon]` pairs, from the vehicle's point on its shape to
   the next stop (or 300 m-1.5 km ahead), or `null`. `path_beyond` continues it to the third
   stop ahead, and `path_stops` gives the stops on both as metres along them (or `null`).
+  `path_speeds` (contract rev 6) is the typical speed per 200 m ahead, from the last 14 days of
+  fixes on the same shape at that day type and hour (or `null`).
   See [`CONTRACT.md`](CONTRACT.md).
 
 ## All vehicles
 
 `GET /v1/vehicles` returns every vehicle with a GPS fix from the last 5 minutes, one snapshot
 for everyone, rebuilt at most every 30 s. Each vehicle has `line`, `id`, `lat`, `lon`,
-`bearing`, `position_at`, `variant`, `delay_s`, `speed`, `path`, `path_beyond` and `path_stops`
+`bearing`, `position_at`, `variant`, `delay_s`, `speed`, `path`, `path_beyond`, `path_stops` and `path_speeds`
 (same meanings as above).
 It does not raise any line's polling priority, so lines nobody watches update about every
 150 s. Send `If-None-Match` with the last `ETag` to get `304` when nothing changed.
@@ -120,7 +122,7 @@ It does not raise any line's polling priority, so lines nobody watches update ab
 
 `GET /v1/vehicles/tiles/{z}/{x}/{y}` returns the part of the same snapshot that lies in one
 XYZ (Web Mercator, slippy map) tile, in the same JSON shape. `z` is `9` (~62 km tiles, no
-`path`, `path_beyond`, `path_stops`; for a zoomed-out map) or `13` (~3.9 km tiles, the full
+`path`, `path_beyond`, `path_stops`, `path_speeds`; for a zoomed-out map) or `13` (~3.9 km tiles, the full
 entries). Tiles exist for lat 37.5..38.5, lon 22.9..24.5 (`z` 9: x 288..290, y 196..198;
 `z` 13: x 4617..4653, y 3145..3174); others are `404`. Each vehicle is in the one tile of its
 position. Use plain URLs: a query string gives `400`, so every client shares the cached copy.
