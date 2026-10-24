@@ -2,8 +2,9 @@
 
 Live positions and GTFS-Realtime for OASA buses and trolleys in Athens, in Go.
 
-**API reference (try it in the browser):** <https://angelospk.github.io/athens-transit-rt/>
-(OpenAPI 3.1: [`docs/openapi/openapi.yaml`](docs/openapi/openapi.yaml)).
+**Public API, no key:** `https://transit.haroldpoi.dev`. **API reference (try it in the browser):**
+<https://angelospk.github.io/athens-transit-rt/> (short link: [bus.haroldpoi.dev/api](https://bus.haroldpoi.dev/api);
+OpenAPI 3.1: [`docs/openapi/openapi.yaml`](docs/openapi/openapi.yaml)).
 
 This is a Go port of [foivospro/athens-gtfs-realtime](https://github.com/foivospro/athens-gtfs-realtime)
 by Foivos Proestakis (MIT). The matching logic, constants and tools follow upstream; the last
