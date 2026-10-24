@@ -1,0 +1,6 @@
+# Lint config for docs/openapi/openapi.yaml (npx @redocly/cli lint docs/openapi/openapi.yaml).
+extends:
+  - recommended
+rules:
+  # The static files on GitHub Pages have no documented 4xx response.
+  operation-4xx-response: off

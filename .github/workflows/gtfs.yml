@@ -1,7 +1,15 @@
 # Checks data.gov.gr for a new OASA GTFS every 6 h. On change it builds the snapshot
 # (release asset, downloaded by the server) and the static map data (GitHub Pages).
+# GitHub Pages also serves the API docs (docs/openapi/). A Pages deployment replaces the
+# whole site, so every deployment comes from here: a push that changes the docs rebuilds the
+# static data from the same GTFS (release assets untouched) and deploys it with the docs.
 name: gtfs
 on:
+  push:
+    branches: [main]
+    paths:
+      - docs/openapi/**
+      - .github/workflows/gtfs.yml
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
@@ -22,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.snap.outputs.changed }}
+      pages: ${{ steps.snap.outputs.changed == 'true' || github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -41,25 +50,34 @@ jobs:
           gh release upload gtfs-snapshot dist/snapshot.bin --clobber
           gh release upload gtfs-snapshot dist/manifest.json --clobber
           cat dist/manifest.json
+      - name: Rebuild static data for a docs-only deployment
+        if: steps.snap.outputs.changed != 'true' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download gtfs-snapshot -p manifest.json -D release
+          ./atrt snapshot --work work --out dist --site site
+          # The GTFS was unchanged a moment ago; fail if OASA published a new one in between
+          # (the next scheduled run publishes it), so the static data matches the release.
+          jq -e --slurpfile r release/manifest.json \
+            '.etag == $r[0].etag and .last_modified == $r[0].last_modified and .gtfs_size == $r[0].gtfs_size' dist/manifest.json
+          # Publish the release's manifest, not the rebuilt one (other built_at and checksum).
+          cp release/manifest.json dist/manifest.json
       - name: Prepare Pages
-        if: steps.snap.outputs.changed == 'true'
+        if: steps.snap.outputs.changed == 'true' || github.event_name == 'push'
         run: |
           cp dist/manifest.json site/static/v1/manifest.json
-          cat > site/index.html <<'HTML'
-          <!doctype html><meta charset="utf-8"><title>athens-transit-rt static data</title>
-          <p>Static map data: <a href="static/v1/lines.json">static/v1/lines.json</a>.
-          See <a href="https://github.com/angelospk/athens-transit-rt">the repository</a>.</p>
-          HTML
+          cp docs/openapi/index.html docs/openapi/openapi.yaml site/
           touch site/.nojekyll
       - uses: actions/configure-pages@v5
-        if: steps.snap.outputs.changed == 'true'
+        if: steps.snap.outputs.changed == 'true' || github.event_name == 'push'
       - uses: actions/upload-pages-artifact@v3
-        if: steps.snap.outputs.changed == 'true'
+        if: steps.snap.outputs.changed == 'true' || github.event_name == 'push'
         with:
           path: site
   deploy:
     needs: build
-    if: needs.build.outputs.changed == 'true'
+    if: needs.build.outputs.pages == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

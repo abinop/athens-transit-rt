@@ -2,6 +2,9 @@
 
 Live positions and GTFS-Realtime for OASA buses and trolleys in Athens, in Go.
 
+**API reference (try it in the browser):** <https://angelospk.github.io/athens-transit-rt/>
+(OpenAPI 3.1: [`docs/openapi/openapi.yaml`](docs/openapi/openapi.yaml)).
+
 This is a Go port of [foivospro/athens-gtfs-realtime](https://github.com/foivospro/athens-gtfs-realtime)
 by Foivos Proestakis (MIT). The matching logic, constants and tools follow upstream; the last
 ported upstream commit is in [`UPSTREAM.md`](UPSTREAM.md). Upstream's HTML viewer and `/events`
@@ -26,7 +29,8 @@ stream are not ported: the map lives in [athens-transit-map](https://github.com/
   and derives a smoothed `speed` and the `path` ahead, so a map can move buses between updates.
 - Serves the live API of [`docs/CONTRACT.md`](docs/CONTRACT.md) and whole-network
   GTFS-Realtime VehiclePositions and TripUpdates (`.pb` and `.json`). Public instance and
-  usage: [`docs/API.md`](docs/API.md). The feeds pass the MobilityData GTFS Realtime validator
+  usage: [API reference](https://angelospk.github.io/athens-transit-rt/),
+  [`docs/API.md`](docs/API.md). The feeds pass the MobilityData GTFS Realtime validator
   with 0 errors ([details](docs/API.md#validation)).
 - Tools from upstream as subcommands: `compare`, `record` (SQLite, upstream schema), `replay`
   (including `--blocks`).
@@ -168,11 +172,14 @@ Use it only on a host that can reach OASA. Both listeners are on 127.0.0.1 only.
 
 | Workflow | When | What |
 |---|---|---|
-| `ci` | push, PR | gofmt, `go vet`, `go test -race`, build |
-| `gtfs` | every 6 h at :17, manual | HEAD data.gov.gr; if ETag/Last-Modified/size changed (or forced), build the snapshot, upload release assets, deploy Pages |
+| `ci` | push, PR | gofmt, `go vet`, `go test -race`, build; lint the OpenAPI spec |
+| `gtfs` | every 6 h at :17, manual, push to `docs/openapi/` | HEAD data.gov.gr; if ETag/Last-Modified/size changed (or forced), build the snapshot, upload release assets, deploy Pages; on a docs push, deploy Pages with the same static data |
 | `upstream-watch` | daily | compare `UPSTREAM.md` with upstream `main`; open one issue per new upstream head |
 
 Static data: <https://angelospk.github.io/athens-transit-rt/static/v1/lines.json>.
+API docs: the same Pages site serves `docs/openapi/` at its root. Check the spec against the
+live servers with `uv run scripts/check-openapi-live.py` (every endpoint, strict schemas), and
+lint it with `npx @redocly/cli lint docs/openapi/openapi.yaml`.
 
 ## Development
 
@@ -184,4 +191,7 @@ Tests never call the live OASA API; recorded answers are in `internal/*/testdata
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE). Upstream: Copyright (c) 2026 Foivos Proestakis, MIT.
+Code: MIT, see [`LICENSE`](LICENSE). Upstream: Copyright (c) 2026 Foivos Proestakis, MIT.
+Data: derived from OASA open data (the static GTFS on
+[data.gov.gr](https://data.gov.gr/dataset/fb049bb1-aea6-4443-95fa-8b941dd6a057) and the OASA
+telematics positions); use it under the terms of those sources.

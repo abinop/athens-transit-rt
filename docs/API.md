@@ -1,7 +1,8 @@
 # athens-transit-rt API
 
 Live positions and GTFS-Realtime for OASA buses and trolleys in Athens. Free to use, no key.
-This page is for external users. The full field reference is [`CONTRACT.md`](CONTRACT.md).
+This page is for external users. Interactive reference: <https://angelospk.github.io/athens-transit-rt/>
+(source: [`openapi/openapi.yaml`](openapi/openapi.yaml)). Full field rules: [`CONTRACT.md`](CONTRACT.md).
 
 > **Ελληνικά, σύντομα.** Δημόσιο API χωρίς κλειδί. GTFS-Realtime για όλο το δίκτυο στο
 > `/v1/gtfs-rt/`, JSON ανά γραμμή στο `/v1/lines/{γραμμή}`. Σεβαστείτε το caching: τα δεδομένα
@@ -15,19 +16,13 @@ instance (see [Self-hosting](../README.md#self-hosting-docker)).
 
 ## Endpoints
 
-| Method and path | Content | `Cache-Control: max-age` |
-|---|---|---|
-| `GET /v1/gtfs-rt/vehicle_positions.pb` | GTFS-RT VehiclePositions, whole network (protobuf) | 15 s |
-| `GET /v1/gtfs-rt/trip_updates.pb` | GTFS-RT TripUpdates, whole network (protobuf) | 15 s |
-| `GET /v1/gtfs-rt/vehicle_positions.json`, `trip_updates.json` | the same feeds as JSON, for debugging | 15 s |
-| `GET /v1/lines/{line_id}` | vehicles of one line, simple JSON | until the next poll of the line (5-300 s) |
-| `GET /v1/vehicles` | all vehicles of all lines, compact JSON | until the next snapshot (5-30 s) |
-| `GET /v1/vehicles/tiles/{z}/{x}/{y}` | the vehicles of one map tile (`z` 9 or 13) | until the next snapshot (5-30 s) |
-| `GET /v1/status` | service health and GTFS version | 10 s |
-| `GET /v1/stats` | list of days with network statistics | 600 s |
-| `GET /v1/stats/days/{YYYY-MM-DD}` | statistics of one day | 1 day |
+The list of endpoints, their parameters and response schemas is the OpenAPI 3.1 spec
+[`openapi/openapi.yaml`](openapi/openapi.yaml), with an interactive reference ("try it") at
+<https://angelospk.github.io/athens-transit-rt/>. This page has usage notes and examples.
 
-Static data (line list, shapes, stops) is on GitHub Pages:
+Live: `/v1/lines/{line_id}`, `/v1/vehicles`, `/v1/vehicles/tiles/{z}/{x}/{y}`,
+`/v1/gtfs-rt/{vehicle_positions,trip_updates}.{pb,json}`, `/v1/status`, `/v1/stats`,
+`/v1/stats/days/{YYYY-MM-DD}`, `/healthz`. Static data (line list, shapes, stops) is on GitHub Pages:
 `https://angelospk.github.io/athens-transit-rt/static/v1/lines.json` and
 `.../static/v1/lines/{line_id}.json`.
 
@@ -214,3 +209,9 @@ docker run --rm -v "$PWD/rt:/w" --entrypoint java ghcr.io/mobilitydata/gtfs-real
   their line, but `trip_id` is `null` until OASA publishes a new GTFS.
 - Please poll the GTFS-RT feeds at most every 15 s and each line at most once per
   `next_update_at`. Faster polling gets the same cached data.
+
+## Licenses
+
+Code: MIT ([`LICENSE`](../LICENSE)). Data: derived from OASA open data (the static GTFS on
+[data.gov.gr](https://data.gov.gr/dataset/fb049bb1-aea6-4443-95fa-8b941dd6a057) and the OASA
+telematics positions); use it under the terms of those sources.

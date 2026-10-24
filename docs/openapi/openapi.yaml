@@ -1,0 +1,1098 @@
+openapi: 3.1.0
+info:
+  title: athens-transit-rt
+  version: "1 (contract rev 6)"
+  summary: Live positions and GTFS-Realtime for OASA buses and trolleys in Athens.
+  description: |
+    Free public API, no key. Live data comes from `https://transit.haroldpoi.dev`; the static map
+    data (lines, shapes, stops) comes from GitHub Pages. This file is the source of truth for the
+    endpoints. Usage notes: [API.md](https://github.com/angelospk/athens-transit-rt/blob/main/docs/API.md);
+    full field rules: [CONTRACT.md](https://github.com/angelospk/athens-transit-rt/blob/main/docs/CONTRACT.md).
+
+    **Hosting.** One home machine (OASA does not answer data-centre addresses), behind the
+    Cloudflare cache. No uptime guarantee. For anything important, run your own instance
+    ([self-hosting](https://github.com/angelospk/athens-transit-rt#self-hosting-docker)).
+
+    **Caching and rate limits.** Every response has `Cache-Control`; the data changes every
+    5-150 s, so asking more often returns the same cached copy. Cloudflare rate-limits each IP to
+    about 30 requests per 10 s (`429`; wait at least 10 s). Poll the GTFS-RT feeds at most every
+    15 s, each line at most once per `next_update_at`, `/v1/vehicles` and its tiles at most once
+    per `next_update_at`.
+
+    **Format.** JSON is UTF-8. Times are Unix seconds. Coordinates are WGS84 degrees. Responses
+    are gzip-compressed when the request allows it. Every response has
+    `Access-Control-Allow-Origin: *`. There is no `OPTIONS` (preflight) support: from a browser,
+    use plain `GET` requests without custom headers.
+
+    **Line ids** are the OASA line numbers in Greek uppercase (`040`, `550`, `Α1`, `Χ96`),
+    percent-encoded in URLs. The live API also accepts Latin look-alikes (`A1` → `Α1`).
+
+    **Data license.** The data is derived from OASA open data: the static GTFS published on
+    [data.gov.gr](https://data.gov.gr/dataset/fb049bb1-aea6-4443-95fa-8b941dd6a057) and the
+    OASA telematics live positions. Use it under the terms of those sources. `trip_id`,
+    `route_id` and `stop_id` refer to the OASA static GTFS of the version in `/v1/status`.
+  contact:
+    name: GitHub issues
+    url: https://github.com/angelospk/athens-transit-rt/issues
+  license:
+    name: MIT (code)
+    identifier: MIT
+externalDocs:
+  description: Source code, self-hosting and prose docs
+  url: https://github.com/angelospk/athens-transit-rt
+security: []  # public, no key
+servers:
+  - url: https://transit.haroldpoi.dev
+    description: Live API (home machine behind Cloudflare)
+tags:
+  - name: Lines
+    description: Vehicles of one line. Asking for a line raises its polling priority.
+  - name: Vehicles
+    description: One shared snapshot of all vehicles, whole or cut into map tiles.
+  - name: GTFS-Realtime
+    description: Whole-network GTFS-RT feeds for journey planners.
+  - name: Service
+    description: Health and GTFS version.
+  - name: Statistics
+    description: Daily network statistics (servers that run with `--history`).
+  - name: Static data
+    description: |
+      Lines, shapes and stops, on GitHub Pages. Rebuilt only when OASA publishes a new GTFS.
+      `Cache-Control: max-age=600`.
+
+paths:
+  /v1/lines/{line_id}:
+    get:
+      tags: [Lines]
+      operationId: getLine
+      summary: Vehicles of one line
+      description: |
+        One URL per line, so all clients share one cached copy. Asking for a line marks it
+        "watched" for about 10 minutes: it is then polled about every 30 s. If nobody asked for
+        it recently it is polled at once, and `next_update_at` is a few seconds away.
+        Refetch at `next_update_at`, not earlier: until then the answer does not change.
+
+        `Cache-Control: public, max-age=<seconds until next_update_at, 5..300>` (120 when the
+        line has no scheduled service now).
+      parameters:
+        - $ref: "#/components/parameters/LineId"
+      responses:
+        "200":
+          description: The line and its vehicles. `vehicles` may be `[]`.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineResponse"
+              example:
+                line: "040"
+                updated_at: 1792878595
+                next_update_at: 1792878627
+                vehicles:
+                  - id: "40830"
+                    lat: 37.94454
+                    lon: 23.665499
+                    bearing: 258
+                    position_at: 1792878565
+                    route_code: "3923"
+                    variant: "5513"
+                    trip_id: 938_day_6_1310_2415
+                    trip_label: 00:15 ΣΥΝΤΑΓΜΑ → ΠΕΙΡΑΙΑΣ
+                    delay_s: -83
+                    next_stop_id: "400088"
+                    speed: 4.8
+                    path: [[37.94457, 23.66549], [37.94429, 23.66359], [37.94441, 23.66261], [37.9447, 23.66187], [37.94611, 23.65972]]
+                    path_beyond: [[37.94611, 23.65972], [37.94769, 23.6573], [37.9482, 23.65584], [37.94876, 23.65289], [37.94878, 23.65119], [37.94803, 23.65064]]
+                    path_stops: [574, 840]
+                    path_speeds: [5.9, 6.2, 6.7, 7.3, 7.3, 7.2, 7.2, 6.7]
+        "404":
+          description: Unknown line (`unknown_line`), or a path that is not clean (`not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: unknown_line
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: The line was not polled yet after a start. Retry in a few seconds.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: warming_up
+
+  /v1/vehicles:
+    get:
+      tags: [Vehicles]
+      operationId: getVehicles
+      summary: All vehicles of all lines
+      description: |
+        Every vehicle with a GPS fix from the last 5 minutes, sorted by `line`, then `id`.
+        One snapshot for everyone, rebuilt at most every 30 s. It does not raise any line's
+        polling priority and causes no OASA request, so lines nobody watches update about every
+        150 s. A vehicle seen on two lines appears once (newest fix). Coordinates have
+        5 decimals. For `route_code`, `trip_id`, `trip_label` and `next_stop_id`, fetch
+        `/v1/lines/{line_id}`.
+
+        `Cache-Control: public, max-age=<seconds until next_update_at, 5..30>`, `ETag`.
+        `If-None-Match` gives `304`; in a browser let the HTTP cache revalidate (do not set
+        `If-None-Match` from JavaScript: it would need a preflight). The body is about 50 KB
+        gzip for 1500 vehicles; for a map, prefer the tiles.
+      responses:
+        "200":
+          description: The snapshot. `vehicles` may be `[]`.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VehiclesResponse"
+              example:
+                updated_at: 1792878586
+                next_update_at: 1792878616
+                vehicles:
+                  - line: "040"
+                    id: "40830"
+                    lat: 37.94454
+                    lon: 23.6655
+                    bearing: 258
+                    position_at: 1792878565
+                    variant: "5513"
+                    delay_s: -83
+                    speed: 4.8
+                    path: [[37.94457, 23.66549], [37.94429, 23.66359], [37.94441, 23.66261], [37.9447, 23.66187], [37.94611, 23.65972]]
+                    path_beyond: [[37.94611, 23.65972], [37.94769, 23.6573], [37.9482, 23.65584], [37.94876, 23.65289], [37.94878, 23.65119], [37.94803, 23.65064]]
+                    path_stops: [574, 840]
+                    path_speeds: [5.9, 6.2, 6.7, 7.3, 7.3, 7.2, 7.2, 6.7]
+                  - line: "115"
+                    id: "98911"
+                    lat: 37.84023
+                    lon: 23.76119
+                    bearing: 310
+                    position_at: 1792878419
+                    variant: null
+                    delay_s: null
+                    speed: null
+                    path: null
+                    path_beyond: null
+                    path_stops: null
+                    path_speeds: null
+        "304":
+          description: Not modified (the request had a matching `If-None-Match`).
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/vehicles/tiles/{z}/{x}/{y}:
+    get:
+      tags: [Vehicles]
+      operationId: getVehicleTile
+      summary: Vehicles of one map tile
+      description: |
+        The `/v1/vehicles` snapshot cut into XYZ (Web Mercator, "slippy map") tiles, so a map
+        loads only what it shows. Same build, `updated_at` and `next_update_at` as
+        `/v1/vehicles`. Each vehicle is in the one tile of its position.
+
+        | `z` | tile size | content | for MapLibre zoom |
+        |---|---|---|---|
+        | `9` | ~62 km | vehicles without `path`, `path_beyond`, `path_stops`, `path_speeds` (keys absent) | < 13 |
+        | `13` | ~3.9 km | the same entries as `/v1/vehicles` | ≥ 13 |
+
+        Tiles exist for lat 37.5..38.5, lon 22.9..24.5: `z` 9 x 288..290, y 196..198; `z` 13
+        x 4617..4653, y 3145..3174. A tile in that box with no vehicle gives `200` with
+        `"vehicles":[]`. Tile of a point (`n = 2^z`): `x = floor((lon + 180) / 360 × n)`,
+        `y = floor((1 − asinh(tan(lat × π/180)) / π) / 2 × n)`.
+
+        Use plain URLs: any query string gives `400`, so every client shares the cached copy.
+        Headers as `/v1/vehicles`. Client rules:
+        [CONTRACT.md](https://github.com/angelospk/athens-transit-rt/blob/main/docs/CONTRACT.md#get-v1vehiclestileszxy-rev-5).
+      parameters:
+        - name: z
+          in: path
+          required: true
+          description: Zoom level, `9` or `13`.
+          schema:
+            type: integer
+            enum: [9, 13]
+          example: 13
+        - name: x
+          in: path
+          required: true
+          description: Tile column (`z` 9 288..290, `z` 13 4617..4653), plain decimal.
+          schema:
+            type: integer
+            minimum: 288
+            maximum: 4653
+          example: 4636
+        - name: y
+          in: path
+          required: true
+          description: Tile row (`z` 9 196..198, `z` 13 3145..3174), plain decimal.
+          schema:
+            type: integer
+            minimum: 196
+            maximum: 3174
+          example: 3160
+      responses:
+        "200":
+          description: Vehicles in the tile (Syntagma area in the example).
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TileResponse"
+              examples:
+                z13:
+                  summary: z 13 (full entries)
+                  value:
+                    updated_at: 1792878586
+                    next_update_at: 1792878616
+                    vehicles:
+                      - line: "11"
+                        id: "88012"
+                        lat: 37.9884
+                        lon: 23.73051
+                        bearing: 12
+                        position_at: 1792878488
+                        variant: "4913"
+                        delay_s: 1158
+                        speed: 3.6
+                        path: [[37.9884, 23.73054], [37.98917, 23.73072]]
+                        path_beyond: [[37.98917, 23.73072], [37.99708, 23.73271]]
+                        path_stops: [87, 572, 984]
+                        path_speeds: [3.5, 3.5, 3.7, 3.9, 4.3, 3.6, 3.9, 4.2]
+                z9:
+                  summary: z 9 (no paths)
+                  value:
+                    updated_at: 1792878586
+                    next_update_at: 1792878616
+                    vehicles:
+                      - line: "040"
+                        id: "40830"
+                        lat: 37.94454
+                        lon: 23.6655
+                        bearing: 258
+                        position_at: 1792878565
+                        variant: "5513"
+                        delay_s: -83
+                        speed: 4.8
+        "304":
+          description: Not modified (the request had a matching `If-None-Match`).
+        "400":
+          description: "The URL has a query string (even a bare `?`). `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: query_not_allowed
+        "404":
+          description: |
+            Any other `z`, `x`/`y` outside the box, numbers not in plain decimal (`04636`,
+            `+4636`), or a trailing `/`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: not_found
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/gtfs-rt/{feed}:
+    get:
+      tags: [GTFS-Realtime]
+      operationId: getGtfsRtFeed
+      summary: Whole-network GTFS-Realtime feed
+      description: |
+        `FULL_DATASET` feeds. `header.timestamp` is the build time, or the newest vehicle fix if
+        that is later. `Cache-Control: public, max-age=15`.
+
+        - **VehiclePositions**: one entity per vehicle (`vehicle-{id}`). A vehicle that is not
+          matched to a trip has a trip descriptor with only `route_id`.
+        - **TripUpdates**: one entity per matched trip, with one `stop_time_update` (the next
+          stop) that carries the current delay. Consumers propagate it to later stops.
+
+        Each vehicle is matched to a scheduled trip by its position along the route (OASA
+        itself publishes no trip ids). The `.pb` feeds pass the MobilityData GTFS Realtime
+        validator with 0 errors. The `.json` variants are the same feeds in protobuf JSON
+        (camelCase, 64-bit numbers as strings), for debugging. Protobuf bindings:
+        [gtfs.org](https://gtfs.org/documentation/realtime/language-bindings/).
+      parameters:
+        - name: feed
+          in: path
+          required: true
+          description: Feed and format.
+          schema:
+            type: string
+            enum: [vehicle_positions.pb, trip_updates.pb, vehicle_positions.json, trip_updates.json]
+          example: vehicle_positions.json
+      responses:
+        "200":
+          description: The feed. Protobuf for `.pb`, protobuf JSON for `.json`.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+                description: A GTFS-Realtime `FeedMessage`.
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GtfsRtFeed"
+              examples:
+                vehicle_positions:
+                  summary: vehicle_positions.json
+                  value:
+                    header: {gtfsRealtimeVersion: "2.0", incrementality: FULL_DATASET, timestamp: "1792878596"}
+                    entity:
+                      - id: vehicle-40830
+                        vehicle:
+                          trip: {tripId: 938_day_6_1310_2415, routeId: "938", startDate: "20261024", scheduleRelationship: SCHEDULED}
+                          vehicle: {id: "40830", label: "40830"}
+                          position: {latitude: 37.94454, longitude: 23.665499, bearing: 258}
+                          currentStopSequence: 23
+                          stopId: "400088"
+                          currentStatus: IN_TRANSIT_TO
+                          timestamp: "1792878565"
+                trip_updates:
+                  summary: trip_updates.json
+                  value:
+                    header: {gtfsRealtimeVersion: "2.0", incrementality: FULL_DATASET, timestamp: "1792878596"}
+                    entity:
+                      - id: trip-938_day_6_1310_2415-20261024
+                        tripUpdate:
+                          trip: {tripId: 938_day_6_1310_2415, routeId: "938", startDate: "20261024", scheduleRelationship: SCHEDULED}
+                          vehicle: {id: "40830"}
+                          stopTimeUpdate:
+                            - {stopSequence: 23, stopId: "400088", arrival: {delay: -83}, scheduleRelationship: SCHEDULED}
+                          timestamp: "1792878565"
+        "404":
+          description: Unknown feed name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: not_found
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: "The feed is not built yet after a start. `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: feed_unavailable
+
+  /v1/status:
+    get:
+      tags: [Service]
+      operationId: getStatus
+      summary: Service health and GTFS version
+      description: |
+        `ok` is `false` when no line poll succeeded in the last 5 minutes. During an OASA outage
+        the last good data stays served; check `updated_at`. When `gtfs_expires` is in the past,
+        trips still match by the same weekday inside the feed's validity until OASA publishes a
+        new GTFS. `Cache-Control: public, max-age=10`.
+      responses:
+        "200":
+          description: Status.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+              example:
+                ok: true
+                gtfs_version: "2026-07-08"
+                gtfs_expires: "2026-10-06"
+                updated_at: 1792878595
+                lines_active: 155
+                budget_rps: 5
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /healthz:
+    get:
+      tags: [Service]
+      operationId: getHealthz
+      summary: Liveness probe
+      description: "The process is up. Says nothing about data freshness (use `/v1/status`). `Cache-Control: no-store`."
+      responses:
+        "200":
+          description: The text `ok` and a newline (sent without a `Content-Type` header).
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: "ok\n"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/stats:
+    get:
+      tags: [Statistics]
+      operationId: getStatsIndex
+      summary: Days with network statistics
+      description: |
+        Each finished day (Europe/Athens, 00:00-24:00) is summed about 2-3 h after midnight. The
+        same files, every day kept, are on the `stats` branch of the repository; prefer them:
+        `https://raw.githubusercontent.com/angelospk/athens-transit-rt/stats/v1/index.json`.
+        `Cache-Control: public, max-age=600`.
+      responses:
+        "200":
+          description: The list of days.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsIndex"
+              example:
+                version: 1
+                latest: "2026-10-23"
+                days: ["2026-10-21", "2026-10-22", "2026-10-23"]
+        "404":
+          description: The server runs without `--history`, or no day is finished yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: not_found
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/stats/days/{date}:
+    get:
+      tags: [Statistics]
+      operationId: getStatsDay
+      summary: Statistics of one day
+      description: |
+        Speed in km/h = `dist_m / time_s × 3.6`; `time_s` 0 means no speed. The values are sums,
+        not averages, so several days add up exactly. A speed sample is two consecutive fixes of
+        one vehicle on the same line, 5-120 s apart and at most 25 m/s, counted in the hour and
+        line of the later fix; the distance is the straight line between them, and stops and
+        traffic lights count. A fix that reaches the server more than 1 h after the end of its
+        day is not counted. In the hour repeated when clocks go back, both hours are one entry.
+        Also on the `stats` branch: `.../stats/v1/days/{date}.json`.
+        `Cache-Control: public, max-age=86400`.
+      parameters:
+        - name: date
+          in: path
+          required: true
+          description: Local day (Europe/Athens), `YYYY-MM-DD`. One from `/v1/stats`.
+          schema:
+            type: string
+            format: date
+          example: "2026-10-23"
+      responses:
+        "200":
+          description: The day (example `by_line` trimmed to 2 lines).
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsDay"
+              example:
+                version: 1
+                date: "2026-10-23"
+                tz: Europe/Athens
+                generated_at: 1792798115
+                first_fix: 1792702800
+                last_fix: 1792789190
+                files: 25
+                fixes: 111227
+                vehicles: 1251
+                lines: 279
+                hours:
+                  - {h: 0, fixes: 2889, vehicles: 249, lines: 126, dist_m: 376132, time_s: 49649}
+                  - {h: 1, fixes: 1029, vehicles: 43, lines: 14, dist_m: 297951, time_s: 35665}
+                  - {h: 2, fixes: 854, vehicles: 28, lines: 8, dist_m: 234891, time_s: 27044}
+                  - {h: 3, fixes: 741, vehicles: 30, lines: 9, dist_m: 210797, time_s: 20832}
+                  - {h: 4, fixes: 1044, vehicles: 133, lines: 81, dist_m: 229418, time_s: 28550}
+                  - {h: 5, fixes: 9985, vehicles: 551, lines: 219, dist_m: 1196926, time_s: 206206}
+                  - {h: 6, fixes: 16675, vehicles: 794, lines: 245, dist_m: 2277732, time_s: 496774}
+                  - {h: 7, fixes: 7414, vehicles: 952, lines: 247, dist_m: 22195, time_s: 6170}
+                  - {h: 8, fixes: 3783, vehicles: 1026, lines: 244, dist_m: 0, time_s: 0}
+                  - {h: 9, fixes: 4234, vehicles: 1024, lines: 240, dist_m: 0, time_s: 0}
+                  - {h: 10, fixes: 3867, vehicles: 990, lines: 236, dist_m: 0, time_s: 0}
+                  - {h: 11, fixes: 3589, vehicles: 972, lines: 235, dist_m: 0, time_s: 0}
+                  - {h: 12, fixes: 5190, vehicles: 956, lines: 236, dist_m: 0, time_s: 0}
+                  - {h: 13, fixes: 3709, vehicles: 940, lines: 234, dist_m: 1898, time_s: 538}
+                  - {h: 14, fixes: 3929, vehicles: 941, lines: 237, dist_m: 0, time_s: 0}
+                  - {h: 15, fixes: 4592, vehicles: 944, lines: 244, dist_m: 0, time_s: 0}
+                  - {h: 16, fixes: 3265, vehicles: 940, lines: 245, dist_m: 0, time_s: 0}
+                  - {h: 17, fixes: 6040, vehicles: 974, lines: 256, dist_m: 0, time_s: 0}
+                  - {h: 18, fixes: 7241, vehicles: 961, lines: 259, dist_m: 4025, time_s: 2190}
+                  - {h: 19, fixes: 10715, vehicles: 926, lines: 257, dist_m: 250682, time_s: 73052}
+                  - {h: 20, fixes: 4318, vehicles: 866, lines: 249, dist_m: 0, time_s: 0}
+                  - {h: 21, fixes: 2233, vehicles: 757, lines: 242, dist_m: 0, time_s: 0}
+                  - {h: 22, fixes: 1854, vehicles: 629, lines: 233, dist_m: 0, time_s: 0}
+                  - {h: 23, fixes: 2037, vehicles: 490, lines: 214, dist_m: 4, time_s: 103}
+                by_line:
+                  - {line: "021", fixes: 230, vehicles: 3, dist_m: 0, time_s: 0}
+                  - {line: "022", fixes: 356, vehicles: 4, dist_m: 0, time_s: 0}
+        "400":
+          description: Malformed date.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: bad_date
+        "404":
+          description: No statistics for that day (server down all day, or not finished yet).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: not_found
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /static/v1/lines.json:
+    servers:
+      - url: https://angelospk.github.io/athens-transit-rt
+        description: GitHub Pages
+    get:
+      tags: [Static data]
+      operationId: getStaticLines
+      summary: All lines
+      responses:
+        "200":
+          description: Every line of the current GTFS (example trimmed to 2 lines).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaticLines"
+              example:
+                gtfs_version: "2026-07-08"
+                lines:
+                  - {id: "021", name: "ΠΛΑΤΕΙΑ ΚΑΝΙΓΓΟΣ - ΓΚΥΖH (ΚΥΚΛΙΚΗ)", name_en: "", color: "#153ce0", text_color: "#ffffff", kind: bus}
+                  - {id: "022", name: "ΑΚΑΔΗΜΙΑ - Ν. ΚΥΨΕΛΗ (ΚΥΚΛΙΚΗ)", name_en: "", color: "#153ce0", text_color: "#ffffff", kind: bus}
+
+  /static/v1/lines/{line_id}.json:
+    servers:
+      - url: https://angelospk.github.io/athens-transit-rt
+        description: GitHub Pages
+    get:
+      tags: [Static data]
+      operationId: getStaticLine
+      summary: Variants, shapes and stops of one line
+      description: |
+        `variant` of a live vehicle keys into `variants`. Greek ids only (no Latin look-alikes
+        here), percent-encoded: `Α1` is `%CE%911.json`.
+      parameters:
+        - name: line_id
+          in: path
+          required: true
+          description: OASA line number, Greek uppercase, as in `lines.json`.
+          schema:
+            type: string
+          example: "040"
+      responses:
+        "200":
+          description: The line (example trimmed to one variant with 2 shape points and 2 stops).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaticLine"
+              example:
+                id: "040"
+                variants:
+                  "5512":
+                    headsign: ΠΕΙΡΑΙΑΣ - ΣΥΝΤΑΓΜΑ(ΠΡΟΣΩΡΙΝΗ ΛΟΓΩ ΕΡΓΩΝ)
+                    direction: 0
+                    shape: [[37.93848, 23.63165], [37.93845, 23.63225]]
+                    stops: ["10183", "400191"]
+                stops:
+                  "10183": {name: ΠΕΙΡΑΙΑΣ, lat: 37.93843, lon: 23.63188}
+                  "400191": {name: ΚΛΕΙΣΟΒΗΣ, lat: 37.93532, lon: 23.63393}
+        "404":
+          description: No such line (GitHub Pages HTML error page).
+
+components:
+  parameters:
+    LineId:
+      name: line_id
+      in: path
+      required: true
+      description: |
+        OASA line number in Greek uppercase (`040`, `550`, `Α1`, `Χ96`), percent-encoded.
+        Latin look-alikes also work (`A1` → `Α1`).
+      schema:
+        type: string
+      example: "040"
+
+  headers:
+    CacheControl:
+      description: "`public, max-age=<seconds>`; see the operation for the value."
+      schema:
+        type: string
+    ETag:
+      description: Version of the snapshot body. Send it back in `If-None-Match` for `304`.
+      schema:
+        type: string
+
+  responses:
+    RateLimited:
+      description: |
+        From Cloudflare: more than about 30 requests per 10 s from one IP. Wait at least 10 s.
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [unknown_line, not_found, warming_up, feed_unavailable, query_not_allowed, bad_date, internal]
+
+    LatLon:
+      type: array
+      description: "`[lat, lon]`, 5 decimals."
+      prefixItems:
+        - type: number
+          minimum: -90
+          maximum: 90
+        - type: number
+          minimum: -180
+          maximum: 180
+      minItems: 2
+      maxItems: 2
+
+    Motion:
+      description: Fields shared by every vehicle entry with paths.
+      type: object
+      properties:
+        speed:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 20
+          description: |
+            Smoothed speed along the route in m/s, one decimal. `0` = standing. `null` when
+            unknown (first sighting, long gap, ambiguous position, more than 150 m from the shape).
+        path:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/LatLon"
+          description: |
+            The route ahead, from the vehicle's point on its shape (at `position_at`) to its next
+            stop when matched, otherwise `max(speed × 150 s, 300 m)` ahead; at most 1.5 km.
+            `null` when there is nothing to move along.
+        path_beyond:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/LatLon"
+          description: |
+            Matched vehicles only: the route on from the end of `path` to the third stop ahead
+            (at most 1.5 km from the vehicle). Its first point is the last point of `path`.
+        path_stops:
+          type: [array, "null"]
+          items:
+            type: integer
+            minimum: 0
+          description: |
+            The stops on `path` followed by `path_beyond`, as whole metres along those points,
+            ascending. `null` when not matched or no stop is on them.
+        path_speeds:
+          type: [array, "null"]
+          maxItems: 8
+          items:
+            type: [number, "null"]
+            minimum: 0.1
+          description: |
+            Typical speed ahead in m/s for consecutive 200 m steps (step `i` covers metres
+            `200·i` to `200·(i+1)`), from the last 14 days of fixes on the same shape, day type
+            and local hour. A step with no history is `null`. `null` when unmatched or unknown.
+
+    VehicleBase:
+      type: object
+      required: [id, lat, lon, bearing, position_at, variant, delay_s]
+      properties:
+        id:
+          type: string
+          description: OASA vehicle number.
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+        lon:
+          type: number
+          minimum: -180
+          maximum: 180
+        bearing:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 360
+          description: Degrees clockwise from north. `null` when unknown.
+        position_at:
+          type: integer
+          description: Time of the GPS fix (Unix seconds).
+        variant:
+          type: [string, "null"]
+          description: |
+            Shape id; keys into `variants` of `/static/v1/lines/{line_id}.json`. `null` when no
+            static variant matches.
+        delay_s:
+          type: [integer, "null"]
+          description: Delay against the schedule in seconds (negative = early). `null` when not matched to a trip.
+
+    LineVehicle:
+      allOf:
+        - $ref: "#/components/schemas/VehicleBase"
+        - $ref: "#/components/schemas/Motion"
+        - type: object
+          required: [route_code, trip_id, trip_label, next_stop_id, speed, path, path_beyond, path_stops, path_speeds]
+          properties:
+            route_code:
+              type: string
+              description: OASA route code of the vehicle's current route.
+            trip_id:
+              type: [string, "null"]
+              description: GTFS `trip_id` of the matched trip, `null` when not matched.
+            trip_label:
+              type: [string, "null"]
+              description: Departure time and direction, e.g. `00:15 ΣΥΝΤΑΓΜΑ → ΠΕΙΡΑΙΑΣ`.
+            next_stop_id:
+              type: [string, "null"]
+              description: GTFS `stop_id` of the next stop.
+
+    CityVehicle:
+      description: A vehicle of `/v1/vehicles` or a `z` 13 tile.
+      allOf:
+        - $ref: "#/components/schemas/VehicleBase"
+        - $ref: "#/components/schemas/Motion"
+        - type: object
+          required: [line, speed, path, path_beyond, path_stops, path_speeds]
+          properties:
+            line:
+              type: string
+              description: Line id.
+
+    CityVehicleLite:
+      description: A vehicle of a `z` 9 tile. The keys `path`, `path_beyond`, `path_stops`, `path_speeds` are absent.
+      allOf:
+        - $ref: "#/components/schemas/VehicleBase"
+        - type: object
+          required: [line, speed]
+          properties:
+            line:
+              type: string
+              description: Line id.
+            speed:
+              $ref: "#/components/schemas/Motion/properties/speed"
+
+    LineResponse:
+      type: object
+      required: [line, updated_at, next_update_at, vehicles]
+      properties:
+        line:
+          type: string
+          description: Canonical (Greek) line id.
+        updated_at:
+          type: integer
+          description: Time of the poll that gave this data.
+        next_update_at:
+          type: integer
+          description: Earliest time new data can exist. Refetch then, not earlier.
+        vehicles:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineVehicle"
+
+    VehiclesResponse:
+      type: object
+      required: [updated_at, next_update_at, vehicles]
+      properties:
+        updated_at:
+          type: integer
+          description: Build time of the snapshot.
+        next_update_at:
+          type: integer
+          description: Earliest next build.
+        vehicles:
+          type: array
+          items:
+            $ref: "#/components/schemas/CityVehicle"
+
+    TileResponse:
+      type: object
+      required: [updated_at, next_update_at, vehicles]
+      properties:
+        updated_at:
+          type: integer
+          description: Build time of the snapshot (the same as `/v1/vehicles`).
+        next_update_at:
+          type: integer
+          description: Earliest next build.
+        vehicles:
+          type: array
+          description: "`CityVehicle` entries in `z` 13 tiles, `CityVehicleLite` entries in `z` 9 tiles."
+          items:
+            anyOf:
+              - $ref: "#/components/schemas/CityVehicle"
+              - $ref: "#/components/schemas/CityVehicleLite"
+
+    Status:
+      type: object
+      required: [ok, gtfs_version, gtfs_expires, updated_at, lines_active, budget_rps]
+      properties:
+        ok:
+          type: boolean
+          description: "`false` when no line poll succeeded in the last 5 minutes."
+        gtfs_version:
+          type: string
+          description: Version (start date) of the static GTFS in use.
+        gtfs_expires:
+          type: string
+          description: Last service date of that GTFS.
+        updated_at:
+          type: integer
+          description: Time of the last published poll (0 before the first one).
+        lines_active:
+          type: integer
+          description: Lines with scheduled service now.
+        budget_rps:
+          type: number
+          description: OASA requests per second the poller may use.
+
+    GtfsRtFeed:
+      type: object
+      description: |
+        A GTFS-Realtime `FeedMessage` in protobuf JSON. Only the fields this server sets are
+        listed; see the [GTFS-RT reference](https://gtfs.org/documentation/realtime/reference/).
+      required: [header]
+      properties:
+        header:
+          type: object
+          required: [gtfsRealtimeVersion, incrementality, timestamp]
+          properties:
+            gtfsRealtimeVersion:
+              type: string
+            incrementality:
+              const: FULL_DATASET
+            timestamp:
+              type: string
+              pattern: "^[0-9]+$"
+        entity:
+          type: array
+          description: Absent when the feed has no entity (protobuf JSON omits empty lists).
+          items:
+            type: object
+            required: [id]
+            properties:
+              id:
+                type: string
+              vehicle:
+                type: object
+                properties:
+                  trip:
+                    $ref: "#/components/schemas/GtfsRtTrip"
+                  vehicle:
+                    type: object
+                    properties:
+                      id: {type: string}
+                      label: {type: string}
+                  position:
+                    type: object
+                    required: [latitude, longitude]
+                    properties:
+                      latitude: {type: number}
+                      longitude: {type: number}
+                      bearing: {type: number}
+                  currentStopSequence: {type: integer}
+                  stopId: {type: string}
+                  currentStatus: {type: string, enum: [IN_TRANSIT_TO, STOPPED_AT]}
+                  timestamp: {type: string, pattern: "^[0-9]+$"}
+              tripUpdate:
+                type: object
+                required: [trip, stopTimeUpdate]
+                properties:
+                  trip:
+                    $ref: "#/components/schemas/GtfsRtTrip"
+                  vehicle:
+                    type: object
+                    properties:
+                      id: {type: string}
+                  stopTimeUpdate:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        stopSequence: {type: integer}
+                        stopId: {type: string}
+                        arrival:
+                          description: Set while the vehicle is on its way to the stop.
+                          type: object
+                          properties:
+                            delay: {type: integer}
+                        departure:
+                          description: Set instead of `arrival` while the vehicle waits at its first stop.
+                          type: object
+                          properties:
+                            delay: {type: integer}
+                        scheduleRelationship: {type: string}
+                  timestamp: {type: string, pattern: "^[0-9]+$"}
+
+    GtfsRtTrip:
+      type: object
+      required: [routeId]
+      properties:
+        tripId: {type: string}
+        routeId: {type: string}
+        startDate: {type: string, pattern: "^[0-9]{8}$"}
+        scheduleRelationship: {type: string}
+
+    StatsIndex:
+      type: object
+      required: [version, latest, days]
+      properties:
+        version:
+          type: integer
+          const: 1
+        latest:
+          type: string
+          format: date
+        days:
+          type: array
+          items:
+            type: string
+            format: date
+
+    StatsDay:
+      type: object
+      required: [version, date, tz, generated_at, first_fix, last_fix, files, fixes, vehicles, lines, hours, by_line]
+      properties:
+        version:
+          type: integer
+          const: 1
+        date:
+          type: string
+          format: date
+        tz:
+          type: string
+          example: Europe/Athens
+        generated_at:
+          type: integer
+          description: When the file was written.
+        first_fix:
+          type: integer
+          description: First fix time of the day (0 when the day has no fix).
+        last_fix:
+          type: integer
+          description: Last fix time of the day.
+        files:
+          type: integer
+          description: History archives read.
+        fixes:
+          type: integer
+          description: GPS fixes.
+        vehicles:
+          type: integer
+          description: Distinct vehicles that sent a fix (depends on polling).
+        lines:
+          type: integer
+          description: Distinct lines.
+        hours:
+          type: array
+          description: 24 entries, index = local hour.
+          minItems: 24
+          maxItems: 24
+          items:
+            type: object
+            required: [h, fixes, vehicles, lines, dist_m, time_s]
+            properties:
+              h: {type: integer, minimum: 0, maximum: 23}
+              fixes: {type: integer}
+              vehicles: {type: integer}
+              lines: {type: integer}
+              dist_m: {type: integer, description: Metres driven in the speed samples.}
+              time_s: {type: integer, description: Seconds of the speed samples.}
+        by_line:
+          type: array
+          description: Every line with a fix, by id.
+          items:
+            type: object
+            required: [line, fixes, vehicles, dist_m, time_s]
+            properties:
+              line: {type: string}
+              fixes: {type: integer}
+              vehicles: {type: integer}
+              dist_m: {type: integer}
+              time_s: {type: integer}
+
+    StaticLines:
+      type: object
+      required: [gtfs_version, lines]
+      properties:
+        gtfs_version:
+          type: string
+        lines:
+          type: array
+          items:
+            type: object
+            required: [id, name, name_en, color, text_color, kind]
+            properties:
+              id: {type: string}
+              name: {type: string, description: Greek name.}
+              name_en: {type: string, description: "English name, may be empty."}
+              color: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}
+              text_color: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}
+              kind: {type: string, enum: [bus, trolley]}
+
+    StaticLine:
+      type: object
+      required: [id, variants, stops]
+      properties:
+        id:
+          type: string
+        variants:
+          type: object
+          description: By shape id (the live `variant`).
+          additionalProperties:
+            type: object
+            required: [headsign, direction, shape, stops]
+            properties:
+              headsign: {type: string}
+              direction: {type: integer, enum: [0, 1]}
+              shape:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LatLon"
+              stops:
+                type: array
+                description: Stop ids in order.
+                items: {type: string}
+        stops:
+          type: object
+          description: By GTFS `stop_id`.
+          additionalProperties:
+            type: object
+            required: [name, lat, lon]
+            properties:
+              name: {type: string}
+              lat: {type: number}
+              lon: {type: number}

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>athens-transit-rt API</title>
+  <meta name="description" content="Live positions and GTFS-Realtime for OASA buses and trolleys in Athens: OpenAPI 3.1 reference with try-it.">
+</head>
+<body>
+  <noscript>
+    <p>athens-transit-rt API: <a href="openapi.yaml">OpenAPI 3.1 spec</a>,
+    <a href="https://github.com/angelospk/athens-transit-rt/blob/main/docs/API.md">usage notes</a>,
+    <a href="static/v1/lines.json">static line data</a>.</p>
+  </noscript>
+  <div id="app"></div>
+  <!-- Scalar API reference, pinned; update the version and the integrity hash together. -->
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.76.0/dist/browser/standalone.js"
+    integrity="sha384-oH1C0RwqcwbVXkC+r8A+4qRoyEUQdtxAzOwumkxZtQBBcsy61FOoPt7B50OVJYYQ"
+    crossorigin="anonymous"></script>
+  <script>
+    // No proxyUrl: "try it" calls the API straight from the browser (the API sends
+    // Access-Control-Allow-Origin: *).
+    Scalar.createApiReference('#app', { url: 'openapi.yaml' })
+  </script>
+</body>
+</html>

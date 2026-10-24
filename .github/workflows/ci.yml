@@ -17,3 +17,8 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build ./cmd/atrt
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx -y @redocly/cli@2.71.0 lint docs/openapi/openapi.yaml
