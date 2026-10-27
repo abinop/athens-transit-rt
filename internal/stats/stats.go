@@ -26,11 +26,11 @@ const (
 	MinGap   = 5 * time.Second   // pairs closer than this are GPS noise
 	MaxGap   = 120 * time.Second // pairs further apart may hide a detour or a layover
 	MaxSpeed = 25.0              // m/s; faster pairs are GPS jumps
-	// Late is how long after its fix time a row may still arrive: a day reads the history
-	// files received up to Late after its end.
+	// Late is how long after its fix time a row may still arrive.
 	Late = time.Hour
-	// Settle is how long after its end a day is summed, so its last files are gzipped.
-	Settle = 2 * time.Hour
+	// Settle is how long after its end a day is summed, so the last files it reads
+	// (up to TripsAfter after its end) are gzipped.
+	Settle = 4 * time.Hour
 
 	dateLayout = "2006-01-02"
 	hourLayout = "2006-01-02T15" // history file names, UTC
@@ -64,8 +64,9 @@ type Day struct {
 	Fixes       int    `json:"fixes"`
 	Vehicles    int    `json:"vehicles"`
 	Lines       int    `json:"lines"`
-	Hours       []Hour `json:"hours"`   // 24, index = local hour
-	ByLine      []Line `json:"by_line"` // lines with a fix, by id
+	Hours       []Hour `json:"hours"`           // 24, index = local hour
+	ByLine      []Line `json:"by_line"`         // lines with a fix, by id
+	Trips       *Trips `json:"trips,omitempty"` // scheduled trips that ran; absent without a plan of the feed the rows used
 }
 
 type Index struct {
@@ -83,8 +84,8 @@ func Bounds(date string, loc *time.Location) (time.Time, time.Time, error) {
 	return d, d.AddDate(0, 0, 1), nil
 }
 
-// Inputs lists the gzipped history archives a day needs: those received from its start until
-// Late after its end. ready is false while one of those hours still has a plain or sealed CSV.
+// Inputs lists the gzipped history archives a day needs: those received from TripSlack before its
+// start until TripsAfter after its end. ready is false while one of those hours still has a plain or sealed CSV.
 func Inputs(dir, date string, loc *time.Location) (files []string, ready bool, err error) {
 	start, end, err := Bounds(date, loc)
 	if err != nil {
@@ -94,7 +95,7 @@ func Inputs(dir, date string, loc *time.Location) (files []string, ready bool, e
 	if err != nil {
 		return nil, false, err
 	}
-	from, to := start.UTC().Truncate(time.Hour), end.Add(Late).UTC()
+	from, to := start.Add(-TripSlack).UTC().Truncate(time.Hour), end.Add(TripsAfter).UTC()
 	ready = true
 	for _, e := range entries {
 		name := e.Name()
@@ -123,15 +124,22 @@ type rec struct {
 
 // Compute sums one day from its input files. A fix counts for the day of its fix time; a speed
 // sample is a pair of consecutive fixes of a vehicle inside the day, on the same line, MinGap to
-// MaxGap apart and at most MaxSpeed, credited to the later fix's hour and line.
-func Compute(date string, loc *time.Location, files []string, now time.Time) (*Day, error) {
+// MaxGap apart and at most MaxSpeed, credited to the later fix's hour and line. With a plan, the
+// matched rows of the files (the day, TripSlack before and TripsAfter after) say how many of the
+// plan's trips ran.
+func Compute(date string, loc *time.Location, files []string, now time.Time, plan *Plan) (*Day, error) {
 	start, end, err := Bounds(date, loc)
 	if err != nil {
 		return nil, err
 	}
 	var recs []rec
+	var trips *tripCounter
+	if plan != nil {
+		trips = newTripCounter(plan)
+	}
+	strs := map[string]string{}
 	for _, f := range files {
-		if recs, err = readFile(f, start.Unix(), end.Unix(), recs); err != nil {
+		if recs, err = readFile(f, start.Unix(), end.Unix(), recs, strs, trips); err != nil {
 			return nil, fmt.Errorf("%s: %w", filepath.Base(f), err)
 		}
 	}
@@ -155,6 +163,9 @@ func Compute(date string, loc *time.Location, files []string, now time.Time) (*D
 	}
 	lines := map[string]*acc{}
 	day := &Day{Version: Version, Date: date, TZ: loc.String(), GeneratedAt: now.Unix(), Files: len(files)}
+	if trips != nil {
+		day.Trips = trips.result()
+	}
 	vehs := map[string]bool{}
 	var prev *rec
 	for i := range recs {
@@ -219,8 +230,9 @@ func sample(a, b *rec) (dist, secs float64, ok bool) {
 	return dist, secs, true
 }
 
-// readFile appends the rows of one gzipped history file whose fix time is in [from, to).
-func readFile(path string, from, to int64, recs []rec) ([]rec, error) {
+// readFile appends the rows of one gzipped history file whose fix time is in [from, to), and
+// gives every matched row to trips (when not nil). Strings repeat a lot: strs interns them.
+func readFile(path string, from, to int64, recs []rec, strs map[string]string, trips *tripCounter) ([]rec, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return recs, err
@@ -246,6 +258,18 @@ func readFile(path string, from, to int64, recs []rec) ([]rec, error) {
 			return recs, fmt.Errorf("no %s column", c)
 		}
 	}
+	intern := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		if v, ok := strs[s]; ok {
+			return v
+		}
+		s = strings.Clone(s)
+		strs[s] = s
+		return s
+	}
+	tripCol, gtfsCol, smCol := optCol(col, "trip_id"), optCol(col, "gtfs"), optCol(col, "s_m")
 	for {
 		row, err := cr.Read()
 		if err == io.EOF {
@@ -258,20 +282,48 @@ func readFile(path string, from, to int64, recs []rec) ([]rec, error) {
 			continue // a row cut by a crash
 		}
 		t, err := strconv.ParseInt(row[col["fix_t"]], 10, 64)
-		if err != nil || t < from || t >= to {
+		if err != nil {
 			continue
+		}
+		g := ""
+		if gtfsCol >= 0 {
+			g = row[gtfsCol]
+		}
+		if trips != nil && tripCol >= 0 && row[tripCol] != "" {
+			sm := int64(-1)
+			if smCol >= 0 {
+				if v, err := strconv.ParseInt(row[smCol], 10, 64); err == nil {
+					sm = v
+				}
+			}
+			trips.add(t, row[tripCol], g, float64(sm))
+		}
+		if t < from || t >= to {
+			continue
+		}
+		if trips != nil && g != "" {
+			trips.stamp(g)
 		}
 		lat, _ := strconv.ParseInt(row[col["lat"]], 10, 64)
 		lon, _ := strconv.ParseInt(row[col["lon"]], 10, 64)
-		recs = append(recs, rec{t: t, line: strings.Clone(row[col["line"]]), veh: strings.Clone(row[col["veh"]]),
+		recs = append(recs, rec{t: t, line: intern(row[col["line"]]), veh: intern(row[col["veh"]]),
 			lat: float64(lat) / 1e6, lon: float64(lon) / 1e6})
 	}
 }
 
+// optCol returns the index of an optional column, -1 when the file has none.
+func optCol(col map[string]int, name string) int {
+	if i, ok := col[name]; ok {
+		return i
+	}
+	return -1
+}
+
 // Run writes <out>/days/<date>.json for every day with history that ended at least Settle ago
 // and has no file yet (force: rewrite them too), then rewrites <out>/index.json from the day
-// files. It returns the days written. A day that fails is skipped (the next run retries it).
-func Run(historyDir, out string, loc *time.Location, now time.Time, force bool) ([]string, error) {
+// files. It returns the days written. A day that fails, or whose plan is not available, is
+// skipped (the next run retries it). A nil plan leaves the days without trips.
+func Run(historyDir, out string, loc *time.Location, now time.Time, force bool, plan PlanFunc) ([]string, error) {
 	daysDir := filepath.Join(out, "days")
 	if err := os.MkdirAll(daysDir, 0o755); err != nil {
 		return nil, err
@@ -289,7 +341,14 @@ func Run(historyDir, out string, loc *time.Location, now time.Time, force bool) 
 			errs = append(errs, err)
 			continue
 		}
-		day, err := Compute(date, loc, files, now)
+		var p *Plan
+		if plan != nil {
+			if p, err = plan(date); err != nil {
+				errs = append(errs, fmt.Errorf("stats %s: plan: %w", date, err))
+				continue
+			}
+		}
+		day, err := Compute(date, loc, files, now, p)
 		if err == nil && day.Fixes == 0 {
 			continue // only late files of the next day: nothing to say about this one
 		}

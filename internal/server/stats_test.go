@@ -35,3 +35,11 @@ func TestStatsEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestStatsPlanUsesTheFeedInUse(t *testing.T) {
+	a := newApp(t, time.Unix(1_800_000_000, 0))
+	p, err := a.statsPlan("2026-09-28") // a Monday of the test feed
+	if err != nil || p.GTFS == "" || p.GTFS != worldVersion(a.world()) || len(p.Trips) != 6 {
+		t.Fatalf("plan = %+v, err %v", p, err)
+	}
+}

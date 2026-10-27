@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,7 +29,7 @@ func (a *App) dailyStats(ctx context.Context) {
 	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
 	for {
-		days, err := stats.Run(filepath.Join(a.cfg.StateDir, "history"), a.statsDir(), loc, a.now(), false)
+		days, err := stats.Run(filepath.Join(a.cfg.StateDir, "history"), a.statsDir(), loc, a.now(), false, a.statsPlan)
 		if len(days) > 0 {
 			a.log.Info("stats: wrote days", "days", days)
 		}
@@ -41,6 +42,20 @@ func (a *App) dailyStats(ctx context.Context) {
 		case <-tick.C:
 		}
 	}
+}
+
+// statsPlan is the schedule of a local day from the feed in use. It builds its own matcher: the
+// world's is not safe for use from this goroutine.
+func (a *App) statsPlan(date string) (*stats.Plan, error) {
+	w := a.world()
+	if w == nil {
+		return nil, errors.New("no static feed yet")
+	}
+	loc, err := time.LoadLocation(stats.TZ)
+	if err != nil {
+		return nil, err
+	}
+	return stats.NewPlan(w.feed, worldVersion(w), date, loc)
 }
 
 // GET /v1/stats: the list of days with statistics.

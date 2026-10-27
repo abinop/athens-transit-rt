@@ -452,7 +452,7 @@ paths:
       operationId: getStatsIndex
       summary: Days with network statistics
       description: |
-        Each finished day (Europe/Athens, 00:00-24:00) is summed about 2-3 h after midnight. The
+        Each finished day (Europe/Athens, 00:00-24:00) is summed about 4-5 h after midnight. The
         same files, every day kept, are on the `stats` branch of the repository; prefer them:
         `https://raw.githubusercontent.com/angelospk/athens-transit-rt/stats/v1/index.json`.
         `Cache-Control: public, max-age=600`.
@@ -491,8 +491,9 @@ paths:
         not averages, so several days add up exactly. A speed sample is two consecutive fixes of
         one vehicle on the same line, 5-120 s apart and at most 25 m/s, counted in the hour and
         line of the later fix; the distance is the straight line between them, and stops and
-        traffic lights count. A fix that reaches the server more than 1 h after the end of its
-        day is not counted. In the hour repeated when clocks go back, both hours are one entry.
+        traffic lights count. A fix that reaches the server more than 3 h after the end of its
+        day is not counted. `trips`: scheduled trips of the day and how many ran (docs/API.md,
+        "Trips that ran"). In the hour repeated when clocks go back, both hours are one entry.
         Also on the `stats` branch: `.../stats/v1/days/{date}.json`.
         `Cache-Control: public, max-age=86400`.
       parameters:
@@ -1043,6 +1044,42 @@ components:
               vehicles: {type: integer}
               dist_m: {type: integer}
               time_s: {type: integer}
+        trips:
+          type: object
+          description: |
+            Scheduled trips that start in the day (static GTFS) and how many ran. A trip ran when
+            the vehicles matched to it covered at least `min_coverage` of its shape between 30 min
+            before its start and 30 min after its end. Missing when the server had no static GTFS
+            of the day's history. `run + partial + missed + unmeasured = planned`.
+          required: [gtfs, gtfs_expired, min_coverage, planned, run, partial, missed, unmeasured, by_line]
+          properties:
+            gtfs: {type: string, description: Static GTFS version the trips come from.}
+            gtfs_expired:
+              type: boolean
+              description: The day is outside the feed's validity; its trips are those of the same weekday inside it.
+            min_coverage: {type: number, example: 0.5}
+            planned: {type: integer}
+            run: {type: integer, description: Covered at least min_coverage.}
+            partial: {type: integer, description: "Seen, but covered less."}
+            missed: {type: integer, description: Never seen.}
+            unmeasured: {type: integer, description: No usable shape.}
+            by_line:
+              type: array
+              description: Every line with a planned trip, by id.
+              items:
+                type: object
+                required: [line, planned, run, partial, missed, unmeasured, missed_trips]
+                properties:
+                  line: {type: string}
+                  planned: {type: integer}
+                  run: {type: integer}
+                  partial: {type: integer}
+                  missed: {type: integer}
+                  unmeasured: {type: integer}
+                  missed_trips:
+                    type: [array, "null"]
+                    description: GTFS trip_ids never seen, by start time.
+                    items: {type: string}
 
     StaticLines:
       type: object

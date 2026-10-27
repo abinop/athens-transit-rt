@@ -21,7 +21,7 @@ Decisions taken from the review:
 
 - **Fix time, not file time.** A day reads the archives received from its start until
   `Late` (1 h) after its end and keeps rows by `fix_t`. A pair across midnight is dropped.
-- **Ready = time, not files.** A day is summed `Settle` (2 h) after its end, once none of its
+- **Ready = time, not files.** A day is summed `Settle` (4 h since 2026-10-27, so trips past midnight end first) after its end, once none of its
   receipt hours has a plain `.csv` or a sealed `.csv.part`. An idle hour (no file) does not
   block. A read error skips the day; the hourly job retries. A written day is never rewritten
   (`atrt stats --force` does). `index.json` is rebuilt from the day files every run.

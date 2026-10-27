@@ -80,7 +80,7 @@ func TestComputeSumsSpeedPerHourAndLine(t *testing.T) {
 		fix{t0.Add(10 * time.Second), "X95", "2", 37.90, 23.80},
 		fix{t0.Add(70 * time.Second), "X95", "2", north(37.90, 600), 23.80}, // 600 m / 60 s
 	)
-	d, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0))
+	d, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestComputeSkipsBadPairs(t *testing.T) {
 		fix{t0.Add(263 * time.Second), "2", "a", north(37.98, 2100), 23.72}, // duplicate fix
 		fix{t0.Add(293 * time.Second), "2", "a", 0, 0},                      // no position
 	)
-	d, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0))
+	d, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestComputePairsOnlyConsecutiveFixes(t *testing.T) {
 		fix{t0.Add(60 * time.Second), "A", "v", north(37.98, 200), 23.72},
 		fix{t0.Add(30 * time.Second), "B", "v", north(37.98, 100), 23.72})
 	writeHour(t, dir, hourName(t0), ".csv.gz", fix{t0, "A", "v", 37.98, 23.72})
-	d, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0))
+	d, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,14 +149,14 @@ func TestComputeUsesFixTimeAndLocalMidnight(t *testing.T) {
 		fix{mid.Add(20 * time.Second), "1", "a", north(37.98, 300), 23.72})
 	writeHour(t, dir, hourName(mid.Add(-time.Hour)), ".csv.gz",
 		fix{mid.Add(-40 * time.Second), "1", "a", north(37.98, -300), 23.72})
-	d6, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0))
+	d6, err := Compute("2026-10-06", athens, inputs(t, dir, "2026-10-06"), time.Unix(0, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if h := d6.Hours[23]; h.Fixes != 2 || h.TimeS != 30 || !near(h.DistM, 300) {
 		t.Fatalf("6th hour 23 = %+v", h)
 	}
-	d7, err := Compute("2026-10-07", athens, inputs(t, dir, "2026-10-07"), time.Unix(0, 0))
+	d7, err := Compute("2026-10-07", athens, inputs(t, dir, "2026-10-07"), time.Unix(0, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestComputeDSTFallBack(t *testing.T) {
 	if end.Sub(start) != 25*time.Hour {
 		t.Fatalf("day length %v", end.Sub(start))
 	}
-	d, err := Compute("2026-10-25", athens, inputs(t, dir, "2026-10-25"), time.Unix(0, 0))
+	d, err := Compute("2026-10-25", athens, inputs(t, dir, "2026-10-25"), time.Unix(0, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestComputeDSTSpringForward(t *testing.T) {
 	after := time.Date(2026, 3, 29, 1, 30, 0, 0, time.UTC)  // 04:30 EEST
 	writeHour(t, dir, hourName(before), ".csv.gz", fix{before, "1", "a", 37.98, 23.72})
 	writeHour(t, dir, hourName(after), ".csv.gz", fix{after, "1", "a", 37.98, 23.72})
-	d, err := Compute("2026-03-29", athens, inputs(t, dir, "2026-03-29"), time.Unix(0, 0))
+	d, err := Compute("2026-03-29", athens, inputs(t, dir, "2026-03-29"), time.Unix(0, 0), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,8 +218,8 @@ func TestRunRetriesAfterAReadError(t *testing.T) {
 	t0 := local(2026, 10, 6, 12, 0, 0)
 	bad := filepath.Join(hist, hourName(t0)+".csv.gz")
 	os.WriteFile(bad, []byte("not gzip"), 0o644)
-	now := local(2026, 10, 7, 3, 0, 0)
-	if got, err := Run(hist, out, athens, now, false); err == nil || len(got) != 0 {
+	now := local(2026, 10, 7, 5, 0, 0)
+	if got, err := Run(hist, out, athens, now, false, nil); err == nil || len(got) != 0 {
 		t.Fatalf("corrupt archive: wrote %v, err %v", got, err)
 	}
 	if exists(filepath.Join(out, "days", "2026-10-06.json")) {
@@ -227,7 +227,7 @@ func TestRunRetriesAfterAReadError(t *testing.T) {
 	}
 	os.Remove(bad)
 	writeHour(t, hist, hourName(t0), ".csv.gz", fix{t0, "1", "a", 37.98, 23.72})
-	if got, err := Run(hist, out, athens, now, false); err != nil || len(got) != 1 {
+	if got, err := Run(hist, out, athens, now, false, nil); err != nil || len(got) != 1 {
 		t.Fatalf("retry: wrote %v, err %v", got, err)
 	}
 }
@@ -264,12 +264,12 @@ func TestRunWritesFinishedDaysOnce(t *testing.T) {
 	t5 := local(2026, 10, 6, 0, 10, 0)
 	writeHour(t, hist, hourName(t5), ".csv.gz", fix{t5, "1", "b", 37.98, 23.72})
 
-	// 01:30 on the 7th: the 6th ended less than Settle ago.
-	if got, err := Run(hist, out, athens, local(2026, 10, 7, 1, 30, 0), false); err != nil || len(got) != 0 {
+	// 03:30 on the 7th: the 6th ended less than Settle ago.
+	if got, err := Run(hist, out, athens, local(2026, 10, 7, 3, 30, 0), false, nil); err != nil || len(got) != 0 {
 		t.Fatalf("early run wrote %v, err %v", got, err)
 	}
-	now := local(2026, 10, 7, 2, 30, 0)
-	got, err := Run(hist, out, athens, now, false)
+	now := local(2026, 10, 7, 4, 30, 0)
+	got, err := Run(hist, out, athens, now, false, nil)
 	if err != nil || strings.Join(got, ",") != "2026-10-06" {
 		t.Fatalf("run wrote %v, err %v", got, err)
 	}
@@ -284,10 +284,10 @@ func TestRunWritesFinishedDaysOnce(t *testing.T) {
 		t.Fatalf("day = %+v", d)
 	}
 	// A later run does not rewrite it, unless forced.
-	if got, _ := Run(hist, out, athens, now.Add(time.Hour), false); len(got) != 0 {
+	if got, _ := Run(hist, out, athens, now.Add(time.Hour), false, nil); len(got) != 0 {
 		t.Fatalf("second run wrote %v", got)
 	}
-	if got, _ := Run(hist, out, athens, now.Add(time.Hour), true); len(got) != 1 {
+	if got, _ := Run(hist, out, athens, now.Add(time.Hour), true, nil); len(got) != 1 {
 		t.Fatalf("forced run wrote %v", got)
 	}
 }
@@ -299,7 +299,7 @@ func TestRunRebuildsIndexFromFiles(t *testing.T) {
 		os.WriteFile(filepath.Join(out, "days", d+".json"), []byte("{}"), 0o644)
 	}
 	os.WriteFile(filepath.Join(out, "days", "junk.json.tmp"), nil, 0o644)
-	if _, err := Run(hist, out, athens, time.Now(), false); err != nil {
+	if _, err := Run(hist, out, athens, time.Now(), false, nil); err != nil {
 		t.Fatal(err)
 	}
 	var idx Index

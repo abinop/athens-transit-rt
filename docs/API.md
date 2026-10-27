@@ -127,7 +127,7 @@ A map view at MapLibre zoom 13 needs 2-15 tiles of 1-8 KB (gzip) instead of the 
 ## Daily statistics
 
 A server that runs with `--history` sums each finished day (Europe/Athens, 00:00-24:00) about
-2-3 h after midnight. `GET /v1/stats` returns `{"version":1,"latest":"2026-10-06","days":[...]}`;
+4-5 h after midnight (it waits for the trips that run past midnight). `GET /v1/stats` returns `{"version":1,"latest":"2026-10-06","days":[...]}`;
 `GET /v1/stats/days/{date}` returns one day (`400` for a malformed date, `404` when missing).
 The same files, every day kept, are on the `stats` branch of this repository; prefer them:
 `https://raw.githubusercontent.com/angelospk/athens-transit-rt/stats/v1/latest.json`,
@@ -141,16 +141,41 @@ The same files, every day kept, are on the `stats` branch of this repository; pr
 | `files`, `fixes`, `vehicles`, `lines` | history archives read, GPS fixes, distinct vehicles, distinct lines |
 | `hours[h]` | 24 entries by local hour: `fixes`, `vehicles`, `lines`, `dist_m`, `time_s` |
 | `by_line[]` | every line with a fix: `line`, `fixes`, `vehicles`, `dist_m`, `time_s` |
+| `trips` | scheduled trips of the day and how many ran (below); missing when the server had no static GTFS of the day's history |
 
 Speed in km/h = `dist_m / time_s * 3.6`; `time_s` 0 means no speed. Sums, not averages, so
 several days add up exactly. A speed sample is two consecutive fixes of one vehicle on the
 same line, 5-120 s apart and at most 25 m/s, counted in the hour and line of the later fix;
 the distance is the straight line between them (a little short on curves) and stops and
 traffic lights count. A fix counts for the day and hour of its own fix time; a fix that
-reaches the server more than 1 h after the end of its day is not counted. A day without any
+reaches the server more than 3 h after the end of its day is not counted. A day without any
 history file (server down all day) has no file and is not listed. `vehicles` counts vehicles that sent a
 fix, which depends on the polling: a line nobody watches is polled about every 150 s. In the
 hour repeated when clocks go back, both hours are summed into one entry.
+
+### Trips that ran (`trips`)
+
+| Field | Meaning |
+|---|---|
+| `gtfs` | the static GTFS version (`gtfs_version` of `/v1/status`) the trips come from |
+| `gtfs_expired` | `true` when the day is outside that feed's validity: the planned trips are those of the same weekday inside it, so they may not be the timetable OASA really ran |
+| `min_coverage` | share of a trip's route a vehicle must cover for the trip to count as run (0.5) |
+| `planned`, `run`, `partial`, `missed`, `unmeasured` | trips the day planned, and how they split: covered at least `min_coverage`; seen but covered less; never seen; no usable shape, so not measured (`run + partial + missed + unmeasured = planned`) |
+| `by_line[]` | every line with a planned trip: `line`, the same five counts, `missed_trips` (GTFS `trip_id`s never seen, by start time; `null` when none) |
+
+A day plans every trip whose scheduled start falls in it (a trip at 24:10 of Monday's service
+counts for Tuesday). A history row counts for a trip when the matcher assigned the vehicle to
+that `trip_id` (same GTFS version) between 30 min before its scheduled start and 30 min after
+its scheduled end. Coverage is the distance along the shape between the first and the last of
+those rows, divided by the shape length between the trip's first and last stop. Share of trips
+run = `run / (planned - unmeasured)`.
+
+Limits: the matcher assigns each vehicle to the closest scheduled trip, so a late bus can take
+the slot of a cancelled one (`run` is an upper bound of the trips really run); a bus without
+working telematics looks like a missed trip (`missed` is an upper bound of cancellations); an
+outage of the server (an hour with few `fixes` in `hours[]`) makes its trips missed; with an
+expired feed, a line or trip the old timetable has but OASA no longer runs counts as missed. Rows of
+another GTFS version are ignored; when they are most of the day's rows, `trips` is left out.
 
 ## GTFS-Realtime details
 
