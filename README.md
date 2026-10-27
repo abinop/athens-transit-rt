@@ -2,7 +2,8 @@
 
 One file per day (Europe/Athens) of the OASA buses and trolleys seen by
 [athens-transit-rt](https://github.com/angelospk/athens-transit-rt): GPS fixes,
-vehicles and travel speed per hour and per line. Updated daily by the `stats` workflow.
+vehicles and travel speed per hour and per line, and how many scheduled trips ran
+(`trips`). Updated daily by the `stats` workflow.
 
 - `v1/latest.json`: the newest day
 - `v1/index.json`: all days
