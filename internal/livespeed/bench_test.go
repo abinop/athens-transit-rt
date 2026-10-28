@@ -24,10 +24,14 @@ func BenchmarkRound1500(b *testing.B) {
 	}
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
+		t := int64(1200 + 30*n) // time goes on: old passes leave the window, the load stays the same
 		for v := 0; v < 1500; v++ {
-			s := float64((v * 67) % 9000)
-			g.Pass(fmt.Sprint(v), roads[v%150], s, s+300, 1200, 1230)
-			g.Blend(nil, roads[v%150], s+300, 1230)
+			s := float64((v*67 + int(t)*8) % 9000)
+			g.Pass(fmt.Sprint(v), roads[v%150], s, s+300, t, t+30)
+			g.Blend(nil, roads[v%150], s+300, t+30)
+		}
+		if n%40 == 0 {
+			g.Prune(t + 30) // housekeeping, every minute in the server
 		}
 	}
 	b.ReportMetric(float64(g.Cells()), "cells")
