@@ -106,12 +106,13 @@ type dailyCall struct {
 // dailyOfLine returns OASA's schedule of today for a line: the runs of all its line codes
 // merged. ok is false when there is none (OASA down, empty, no line code): use the GTFS then.
 func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (telematics.DailySchedule, bool) {
-	return a.dailyVia(ctx, line, today, a.daily, dailyTimeout)
+	return a.dailyVia(ctx, line, today, a.daily, dailyTimeout, true)
 }
 
 // dailyVia is dailyOfLine with the way to ask OASA (urgent for a request, background for the
-// prefetch) and the time all the line's codes may take.
-func (a *App) dailyVia(ctx context.Context, line string, today time.Time, get dailyFunc, timeout time.Duration) (telematics.DailySchedule, bool) {
+// prefetch) and the time the caller may wait, for its own fetch or one in flight. detach: the
+// fetch outlives the caller (a request); the prefetch's ends with the service instead.
+func (a *App) dailyVia(ctx context.Context, line string, today time.Time, get dailyFunc, timeout time.Duration, detach bool) (telematics.DailySchedule, bool) {
 	day := today.Format(time.DateOnly)
 	now := a.now()
 	a.dailyMu.Lock()
@@ -121,7 +122,11 @@ func (a *App) dailyVia(ctx context.Context, line string, today time.Time, get da
 	}
 	if c, busy := a.dailyCalls[line]; busy {
 		a.dailyMu.Unlock()
+		wait := time.NewTimer(timeout) // a prefetch fetch may wait minutes for its slots
+		defer wait.Stop()
 		select {
+		case <-wait.C:
+			return telematics.DailySchedule{}, false
 		case <-c.done:
 			if c.e.day != day {
 				return telematics.DailySchedule{}, false // started before midnight: yesterday's runs
@@ -138,15 +143,21 @@ func (a *App) dailyVia(ctx context.Context, line string, today time.Time, get da
 	a.dailyCalls[line] = c
 	a.dailyMu.Unlock()
 
-	// The fetch outlives the request that started it: the others wait for it, and the cache
-	// must not keep a timetable cut short by one client leaving.
-	c.e = a.fetchDaily(context.WithoutCancel(ctx), line, day, now, get, timeout)
+	// A request's fetch outlives it: the others wait for it, and the cache must not keep a
+	// timetable cut short by one client leaving.
+	fctx := ctx
+	if detach {
+		fctx = context.WithoutCancel(ctx)
+	}
+	c.e = a.fetchDaily(fctx, line, day, now, get, timeout)
 
 	a.dailyMu.Lock()
 	if a.dailyCache == nil {
 		a.dailyCache = map[string]dailyEntry{}
 	}
-	a.dailyCache[line] = c.e
+	if old, ok := a.dailyCache[line]; !ok || old.day <= c.e.day { // never yesterday's over today's
+		a.dailyCache[line] = c.e
+	}
 	delete(a.dailyCalls, line)
 	a.dailyMu.Unlock()
 	close(c.done)

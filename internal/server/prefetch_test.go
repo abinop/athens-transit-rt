@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 	"github.com/angelospk/athens-transit-rt/internal/telematics"
 )
 
@@ -62,5 +63,72 @@ func TestPrefetchDailyStopsWithContext(t *testing.T) {
 	}
 	if bg.Load() != 1 {
 		t.Fatalf("calls after the stop: %d", bg.Load())
+	}
+}
+
+// A request that finds the prefetch fetching its line waits no longer than its own deadline
+// (Codex): the shared fetch goes on, the request falls back to the GTFS.
+func TestDailyJoinWaitsOnlyItsOwnDeadline(t *testing.T) {
+	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "608"}},
+		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}})
+	release := make(chan struct{})
+	started := make(chan struct{})
+	slow := func(ctx context.Context, _ string) (telematics.DailySchedule, error) {
+		close(started)
+		<-release
+		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
+	}
+	go a.dailyVia(context.Background(), "608", monday1020, slow, time.Minute, false)
+	<-started
+	t0 := time.Now()
+	if _, ok := a.dailyVia(context.Background(), "608", monday1020, slow, 50*time.Millisecond, true); ok {
+		t.Fatal("a timetable before the fetch ended")
+	}
+	if d := time.Since(t0); d > time.Second {
+		t.Fatalf("the request waited %v", d)
+	}
+	close(release)
+}
+
+// A shutdown ends a prefetch fetch that waits for its slot (Codex).
+func TestPrefetchDailyShutdownWhileWaiting(t *testing.T) {
+	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "608"}},
+		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	a.dailyBg = func(c context.Context, _ string) (telematics.DailySchedule, error) {
+		cancel()
+		<-c.Done()
+		return telematics.DailySchedule{}, c.Err()
+	}
+	done := make(chan bool)
+	go func() { done <- a.prefetchDailyOnce(ctx) }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("finished although stopped")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the prefetch outlived the shutdown")
+	}
+}
+
+// A round that runs past midnight stops: it must not write yesterday's timetables (Codex).
+func TestPrefetchDailyStopsAtMidnight(t *testing.T) {
+	var now atomic.Int64
+	now.Store(time.Date(2026, 10, 5, 23, 59, 50, 0, gtfs.Athens).UnixNano())
+	clock := func() time.Time { return time.Unix(0, now.Load()).In(gtfs.Athens) }
+	a := appWithLines(t, clock, []telematics.Line{{LineCode: "R1", LineID: "608"}, {LineCode: "R2", LineID: "040"}},
+		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}})
+	var bg atomic.Int32
+	a.dailyBg = func(context.Context, string) (telematics.DailySchedule, error) {
+		bg.Add(1)
+		now.Add(int64(20 * time.Second)) // the first line ends after midnight
+		return telematics.DailySchedule{Descr: "A - B", Go: []string{"23:00"}}, nil
+	}
+	if a.prefetchDailyOnce(context.Background()) {
+		t.Fatal("the round went on past midnight")
+	}
+	if bg.Load() != 1 {
+		t.Fatalf("lines fetched: %d, want 1", bg.Load())
 	}
 }

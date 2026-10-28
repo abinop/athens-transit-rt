@@ -33,14 +33,14 @@ func (a *App) prefetchDaily(ctx context.Context) {
 }
 
 // prefetchDailyOnce fetches today's timetable of each line not cached yet, one line at a time.
-// false when ctx ended first.
+// false when ctx ended or the day changed first.
 func (a *App) prefetchDailyOnce(ctx context.Context) bool {
 	today := gtfs.Midnight(a.now())
 	for _, line := range a.meta.LineIDs() {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || !gtfs.Midnight(a.now()).Equal(today) { // past midnight: the next round
 			return false
 		}
-		a.dailyVia(ctx, CanonicalLine(line), today, a.dailyBg, dailyPrefetchTimeout)
+		a.dailyVia(ctx, CanonicalLine(line), today, a.dailyBg, dailyPrefetchTimeout, false)
 	}
 	return ctx.Err() == nil
 }
