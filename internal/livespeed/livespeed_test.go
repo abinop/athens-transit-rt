@@ -106,3 +106,32 @@ func TestBlendIntoTheStepsAhead(t *testing.T) {
 		t.Fatalf("live traffic without a typical table: %v", got)
 	}
 }
+
+// Live traffic over half a step: that half is blended, the other half keeps the usual speed
+// (Codex). 100 m at 0.7×10 + 0.3×5 = 8.5 m/s and 100 m at 5 m/s: 200 m in 31.8 s.
+func TestBlendHalfAStep(t *testing.T) {
+	g := New()
+	pass(g, "a", east, 0, 100, 10, 1000)
+	pass(g, "b", east, 0, 100, 10, 1000)
+	five := 5.0
+	got := g.Blend([]*float64{&five}, east, 0, 1000)
+	near(t, *got[0], math.Round(200/(100/8.5+100/5.0)*10)/10)
+}
+
+// Passes reach a cell out of time order (vehicles polled at different times): an expired one
+// behind a newer one is pruned too (Codex).
+func TestPruneOutOfOrder(t *testing.T) {
+	g := New()
+	pass(g, "a", east, 0, 100, 10, 2000)
+	pass(g, "b", east, 0, 100, 10, 500) // older, arrives later
+	g.Prune(500 + int64(Window.Seconds()) + 1)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, ss := range g.cells {
+		for _, s := range ss {
+			if s.t == 500 {
+				t.Fatal("an expired pass kept behind a newer one")
+			}
+		}
+	}
+}
