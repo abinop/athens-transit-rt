@@ -41,7 +41,7 @@ type sample struct {
 // Grid is safe for concurrent use.
 type Grid struct {
 	mu    sync.Mutex
-	cells map[key][]sample // oldest first
+	cells map[key][]sample // in arrival order: vehicles are polled at different times
 }
 
 func New() *Grid { return &Grid{cells: map[key][]sample{}} }
@@ -91,12 +91,13 @@ func (g *Grid) Pass(vehicle string, line *geo.Polyline, s0, s1 float64, t0, t1 i
 	defer g.mu.Unlock()
 	old := t1 - int64(Window.Seconds())
 	for k, v := range add {
-		ss := g.cells[k]
-		i := 0
-		for i < len(ss) && ss[i].t < old {
-			i++
+		kept := g.cells[k][:0]
+		for _, x := range g.cells[k] {
+			if x.t >= old {
+				kept = append(kept, x)
+			}
 		}
-		g.cells[k] = append(ss[i:], sample{t1, vehicle, v[0], v[1]})
+		g.cells[k] = append(kept, sample{t1, vehicle, v[0], v[1]})
 	}
 }
 
@@ -144,14 +145,16 @@ func (g *Grid) Prune(now int64) {
 	defer g.mu.Unlock()
 	old := now - int64(Window.Seconds())
 	for k, ss := range g.cells {
-		i := 0
-		for i < len(ss) && ss[i].t < old {
-			i++
+		kept := ss[:0:0]
+		for _, x := range ss {
+			if x.t >= old { // passes reach a cell out of time order
+				kept = append(kept, x)
+			}
 		}
-		if i == len(ss) {
+		if len(kept) == 0 {
 			delete(g.cells, k)
-		} else if i > 0 {
-			g.cells[k] = append([]sample(nil), ss[i:]...)
+		} else {
+			g.cells[k] = kept
 		}
 	}
 }
@@ -164,8 +167,8 @@ func (g *Grid) Cells() int {
 }
 
 // Blend returns the steps ahead (segspeed.Steps: m/s per StepM from s along line, nil unknown)
-// with today's traffic: a step whose road has a live speed gets LiveWeight of it and the rest
-// of the usual speed, or the live speed alone when there is no usual one. typical is not
+// with today's traffic: the road of a step with a live speed counts at LiveWeight of it and the
+// rest of the usual speed, the road without at the usual speed (stepSpeed). typical is not
 // changed. nil when no step has a speed, as Steps.
 func (g *Grid) Blend(typical []*float64, line *geo.Polyline, s float64, now int64) []*float64 {
 	if line == nil || len(line.XY) < 2 {
@@ -183,11 +186,7 @@ func (g *Grid) Blend(typical []*float64, line *geo.Polyline, s float64, now int6
 		if k < len(typical) {
 			v = typical[k]
 		}
-		if live, ok := g.stepSpeed(line, start, math.Min(start+segspeed.StepM, length), now); ok {
-			b := live
-			if v != nil {
-				b = LiveWeight*live + (1-LiveWeight)**v
-			}
+		if b, ok := g.stepSpeed(line, start, math.Min(start+segspeed.StepM, length), v, now); ok {
 			b = math.Max(segspeed.MinBinSpeed, math.Round(b*10)/10)
 			v = &b
 		}
@@ -200,19 +199,29 @@ func (g *Grid) Blend(typical []*float64, line *geo.Polyline, s float64, now int6
 	return out
 }
 
-// stepSpeed is the live speed over [from, to] of line, time-weighted over the cells it crosses
-// that have one.
-func (g *Grid) stepSpeed(line *geo.Polyline, from, to float64, now int64) (float64, bool) {
-	m, secs := 0.0, 0.0
+// stepSpeed is the speed over [from, to] of line, time-weighted over its pieces: a piece with a
+// live speed at LiveWeight of it and the rest of typical (live alone without typical), a piece
+// without at typical. ok is false when no piece has a live speed. Without typical the pieces
+// with no live speed are left out: nothing is known there.
+func (g *Grid) stepSpeed(line *geo.Polyline, from, to float64, typical *float64, now int64) (float64, bool) {
+	m, secs, live := 0.0, 0.0, false
 	for a := from; a < to; a += pieceM {
 		b := math.Min(a+pieceM, to)
 		mid := (a + b) / 2
-		if v, ok := g.speedAt(cellOf(line.At(mid), heading(line, mid)), now); ok {
-			m += b - a
-			secs += (b - a) / math.Max(v, segspeed.MinBinSpeed)
+		v, ok := g.speedAt(cellOf(line.At(mid), heading(line, mid)), now)
+		switch {
+		case ok && typical != nil:
+			v = LiveWeight*v + (1-LiveWeight)**typical
+		case typical != nil:
+			v = *typical
+		case !ok:
+			continue
 		}
+		live = live || ok
+		m += b - a
+		secs += (b - a) / math.Max(v, segspeed.MinBinSpeed)
 	}
-	if secs == 0 {
+	if !live || secs == 0 {
 		return 0, false
 	}
 	return m / secs, true

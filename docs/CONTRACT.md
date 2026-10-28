@@ -14,8 +14,8 @@ Source of truth: `athens-transit-rt/docs/CONTRACT.md`. The frontend keeps a copy
   frontend repo by whoever made it (backend thread opens the copy as a commit or
   issue on the frontend repo).
 
-Revision: 6 (2026-10-21): `path_speeds` on vehicles (typical speeds ahead)
-(rev 5: `GET /v1/vehicles/tiles/{z}/{x}/{y}`; rev 4: `path_beyond` and `path_stops` on vehicles; rev 3: `GET /v1/vehicles`; `speed` and
+Revision: 7 (2026-10-28): `path_speeds` also follow today's traffic (same shape and units)
+(rev 6: `path_speeds` on vehicles (typical speeds ahead); rev 5: `GET /v1/vehicles/tiles/{z}/{x}/{y}`; rev 4: `path_beyond` and `path_stops` on vehicles; rev 3: `GET /v1/vehicles`; `speed` and
 `path` on vehicles)
 
 ## Hosts
@@ -99,9 +99,11 @@ The frontend combines lines in the browser. Max 5 lines per client (enforced in 
   covers metres `200·i` to `200·(i+1)` ahead, the last one may be shorter (shape's end), at
   most 8 steps (1.6 km). It comes from the last 14 days of fixes of vehicles on the same shape,
   per 200 m of the shape, day type (weekday, Saturday, Sunday) and local hour, falling back to
-  all hours; waits at stops and lights are included. A step with no history is `null`. `null`
-  when unmatched, waiting to start, the backend runs without fix history, or nothing ahead is
-  known. Use (rev 6 clients): move along `path` then `path_beyond` from `position_at` at
+  all hours; waits at stops and lights are included. Rev 7: where buses of any line crossed
+  the same road in the same direction in the last 20 minutes (at least 2 buses, per 100 m of
+  road), that road counts at 0.7 × their speed + 0.3 × the typical one (their speed alone
+  without history). A step with neither is `null`. `null` when unmatched, waiting to start,
+  or nothing ahead is known. Clients need no change. Use (rev 6 clients): move along `path` then `path_beyond` from `position_at` at
   the step speeds (a `null` step at `speed`, or 1.5 m/s without one), instead of the stop
   waits; stop at the end of the points, as before. Metres are along the shape; the 5 m
   simplified points are a few metres shorter, so a client may simply walk them.

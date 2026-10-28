@@ -349,7 +349,7 @@ type Vehicle struct {
 	Path       [][2]float64 `json:"path"`        // [lat, lon] of the route ahead, to the next stop
 	PathBeyond [][2]float64 `json:"path_beyond"` // rev 4: on from path's end to the third stop
 	PathStops  []int        `json:"path_stops"`  // rev 4: metres along path + path_beyond of each stop
-	PathSpeeds []*float64   `json:"path_speeds"` // rev 6: typical m/s per 200 m step ahead
+	PathSpeeds []*float64   `json:"path_speeds"` // rev 6: typical m/s per 200 m step ahead; rev 7: with today's traffic
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -417,7 +417,7 @@ func (a *App) motionOf(w *world, r *match.Result, shape int32) (speed *float64, 
 	if !ok {
 		return nil, nil, nil, nil, nil
 	}
-	speed = a.motion.observe(r.VehicleID, line, s, r.Time)
+	speed = a.motion.observeAs(r.VehicleID, line, s, r.Time, !r.Waiting)
 	path, _, _ = pathAhead(line, s, speed, nil)
 	return speed, path, nil, nil, nil
 }
