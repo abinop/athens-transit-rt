@@ -174,9 +174,15 @@ curl -s 127.0.0.1:8096/metrics | jq '{max_1s, max_10s, sent_by_tier, lines_by_ti
 
 ## Self-hosting (Docker)
 
-**OASA answers only home (residential) internet connections in Greece.** Requests from
-data-centre and cloud addresses time out (tested: Oracle Cloud, Google Apps Script, Cloudflare
-WARP, Webshare proxies, a Greek hosting provider). Run the container on a machine at home.
+**OASA answers only IP addresses in Greece.** Requests from elsewhere time out (tested:
+Oracle Cloud, Google Apps Script, Cloudflare WARP and Workers outside Athens, Webshare proxies,
+Hetzner, netcup, Cyprus and Bulgaria, even home connections there). Data-centre addresses in
+Greece work: on 2026-10-28, 10 of 10 Globalping probes in Greece got answers, 7 of them in data
+centres (Synapsecom, MVPS, Novelcomm, Fusioned, Euclid Services, Datacamp), and an MVPS VPS in
+Thessaloniki (1 vCPU, 2 GB) runs the container below. Run it on a machine at home in Greece or
+on a VPS whose address is in Greece; check first with
+`curl -m 20 "https://telematics.oasa.gr/api/?act=getBusLocation&p1=2045"`, which returns
+JSON when OASA answers.
 
 ```bash
 curl -O https://raw.githubusercontent.com/angelospk/athens-transit-rt/main/compose.yaml

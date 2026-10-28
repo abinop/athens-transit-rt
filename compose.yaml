@@ -1,6 +1,6 @@
 # Self-hosting: docker compose up -d
-# OASA answers only home (residential) Greek internet connections; data-centre and cloud
-# addresses time out. Run this on a machine at home in Greece.
+# OASA answers only IP addresses in Greece; addresses elsewhere time out. Run this at home
+# in Greece or on a VPS whose address is in Greece (see README, Self-hosting).
 services:
   atrt:
     image: ghcr.io/angelospk/athens-transit-rt:latest
