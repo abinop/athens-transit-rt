@@ -6,6 +6,15 @@ for self-hosting. API reference: [docs/API.md](docs/API.md), OpenAPI 3.1:
 [docs/openapi/openapi.yaml](docs/openapi/openapi.yaml), viewer with try-it:
 <https://angelospk.github.io/athens-transit-rt/>. Contract for clients: [docs/CONTRACT.md](docs/CONTRACT.md).
 
+## Unreleased
+
+### Live API
+- `GET /v1/stops/{stop_id}/arrivals`: OASA's own predictions for a stop (line, route code,
+  vehicle, minutes), soonest first, cached 30 s per stop with `Cache-Control` until that cache
+  expires. The OASA calls take at most one request slot in four, so the line polls keep at least
+  three quarters of the budget; when OASA or the queue cannot answer, the last good answer up to
+  2 minutes old is served. Shares its cache with the MCP tool `stop_arrivals`.
+
 ## v0.1.0 (2026-10-28)
 
 First tagged version. Everything below is live on the public instance.

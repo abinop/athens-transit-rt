@@ -49,6 +49,8 @@ tags:
     description: Vehicles of one line. Asking for a line raises its polling priority.
   - name: Vehicles
     description: One shared snapshot of all vehicles, whole or cut into map tiles.
+  - name: Stops
+    description: OASA's own arrival predictions at a stop.
   - name: GTFS-Realtime
     description: Whole-network GTFS-RT feeds for journey planners.
   - name: Service
@@ -623,6 +625,62 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/stops/{stop_id}/arrivals:
+    get:
+      tags: [Stops]
+      operationId: getStopArrivals
+      summary: Next buses at a stop (OASA's predictions)
+      description: |
+        OASA's own predictions (`getStopArrivals`), soonest first. They do not need a GTFS trip
+        match. One OASA call per stop per 30 s: answers are cached 30 s and `Cache-Control` lasts
+        until that cache expires (`public, max-age` 5-30). The calls share the server's OASA
+        budget with the line polls and get at most one request slot in four, so they never slow
+        the vehicle positions below three quarters of the budget. When OASA or the request queue
+        cannot answer, the stop's last good answer up to 2 minutes old is served with its own
+        `updated_at` and `max-age=5`.
+      parameters:
+        - name: stop_id
+          in: path
+          required: true
+          description: GTFS `stop_id` (the OASA stop code), as in the static `lines/{id}.json` stops.
+          schema: {type: string}
+          example: "240084"
+      responses:
+        "200":
+          description: Predictions, possibly empty.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopArrivals"
+              example:
+                stop_id: "240084"
+                stop_name: "ΠΛ. ΔΑΒΑΚΗ"
+                updated_at: 1793210650
+                arrivals:
+                  - {line: "5", route_code: "1992", vehicle: "88019", minutes: 28}
+        "404":
+          description: "`unknown_stop`: no such stop in the GTFS (OASA is not asked)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "502":
+          description: "`upstream_unavailable`: OASA failed and no answer of the last 2 minutes is cached."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503":
+          description: |
+            `warming_up`: the GTFS is not loaded yet. `busy`: the server's OASA request queue is
+            full and no answer of the last 2 minutes is cached; try again shortly.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /v1/rail/stasy/departures:
     get:
       tags: [Rail]
@@ -968,7 +1026,7 @@ components:
       properties:
         error:
           type: string
-          enum: [unknown_line, not_found, warming_up, feed_unavailable, query_not_allowed, bad_date, internal, missing_stop, unknown_stop, unknown_trip, unknown_train, upstream_unavailable]
+          enum: [unknown_line, not_found, warming_up, feed_unavailable, query_not_allowed, bad_date, internal, missing_stop, unknown_stop, unknown_trip, unknown_train, upstream_unavailable, busy]
 
     LatLon:
       type: array
@@ -1155,6 +1213,37 @@ components:
             anyOf:
               - $ref: "#/components/schemas/CityVehicle"
               - $ref: "#/components/schemas/CityVehicleLite"
+
+    StopArrivals:
+      type: object
+      required: [stop_id, stop_name, updated_at, arrivals]
+      properties:
+        stop_id:
+          type: string
+        stop_name:
+          type: string
+          description: Stop name from the GTFS.
+        updated_at:
+          type: integer
+          description: When OASA gave these predictions (Unix seconds).
+        arrivals:
+          type: array
+          items:
+            type: object
+            required: [line, route_code, vehicle, minutes]
+            properties:
+              line:
+                type: string
+                description: Line number; empty when the route code is not in OASA's line list.
+              route_code:
+                type: string
+                description: OASA route code (one direction or variant of the line).
+              vehicle:
+                type: string
+                description: OASA vehicle number (`veh_code` of `getStopArrivals`).
+              minutes:
+                type: integer
+                description: OASA's predicted minutes to arrival.
 
     Status:
       type: object

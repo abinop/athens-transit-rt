@@ -39,6 +39,7 @@ type arrivalsEntry struct {
 // arrivalsCall is an OASA call in flight for a stop: requests for the same stop wait for it.
 type arrivalsCall struct {
 	done chan struct{}
+	at   time.Time
 	list []telematics.Arrival
 	err  error
 }
@@ -312,46 +313,52 @@ func (a *App) toolStopArrivals(ctx context.Context, in stopIn) *mcp.CallToolResu
 	if w.feed.StopIndex(id) < 0 {
 		return toolErr("unknown_stop: %s", id)
 	}
-	list, err := a.arrivals(ctx, id)
+	e, err := a.arrivals(ctx, id)
 	if errors.Is(err, errQueueFull) {
 		return toolErr("busy: try again in a minute")
 	}
 	if err != nil {
 		return toolErr("upstream_unavailable")
 	}
+	lineOf := a.routeLines()
+	type row struct {
+		Line    string `json:"line"`
+		Minutes int    `json:"minutes"`
+		Vehicle string `json:"vehicle"`
+	}
+	out := make([]row, 0, len(e.list))
+	for _, ar := range e.list {
+		out = append(out, row{lineOf[ar.RouteCode], ar.Minutes, ar.VehCode})
+	}
+	return okJSON(out)
+}
+
+// routeLines maps each OASA route code to its line number, from the line metadata.
+func (a *App) routeLines() map[string]string {
 	lineOf := map[string]string{}
 	for line, refs := range a.meta.LineRoutes() {
 		for _, r := range refs {
 			lineOf[r.Code] = line
 		}
 	}
-	type row struct {
-		Line    string `json:"line"`
-		Minutes int    `json:"minutes"`
-		Vehicle string `json:"vehicle"`
-	}
-	out := make([]row, 0, len(list))
-	for _, ar := range list {
-		out = append(out, row{lineOf[ar.RouteCode], ar.Minutes, ar.VehCode})
-	}
-	return okJSON(out)
+	return lineOf
 }
 
-// arrivals returns OASA's predictions for a stop: cached for stopArrivalsTTL, one call per stop at
-// a time (the others wait for it). Errors are not cached.
-func (a *App) arrivals(ctx context.Context, id string) ([]telematics.Arrival, error) {
+// arrivals returns OASA's predictions for a stop and when they were fetched: cached for
+// stopArrivalsTTL, one call per stop at a time (the others wait for it). Errors are not cached.
+func (a *App) arrivals(ctx context.Context, id string) (arrivalsEntry, error) {
 	a.arrMu.Lock()
 	if e, ok := a.arrCache[id]; ok && a.now().Sub(e.at) < stopArrivalsTTL {
 		a.arrMu.Unlock()
-		return e.list, nil
+		return e, nil
 	}
 	if c, busy := a.arrCalls[id]; busy {
 		a.arrMu.Unlock()
 		select {
 		case <-c.done:
-			return c.list, c.err
+			return arrivalsEntry{c.at, c.list}, c.err
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return arrivalsEntry{}, ctx.Err()
 		}
 	}
 	c := &arrivalsCall{done: make(chan struct{})}
@@ -366,18 +373,31 @@ func (a *App) arrivals(ctx context.Context, id string) ([]telematics.Arrival, er
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopArrivalsTimeout)
 	c.list, c.err = a.stopArrivals(fctx, id)
 	cancel()
+	c.at = a.now()
 
 	a.arrMu.Lock()
 	if c.err == nil {
 		if a.arrCache == nil {
 			a.arrCache = map[string]arrivalsEntry{}
 		}
-		a.arrCache[id] = arrivalsEntry{a.now(), c.list}
+		a.arrCache[id] = arrivalsEntry{c.at, c.list}
 	}
 	delete(a.arrCalls, id)
 	a.arrMu.Unlock()
 	close(c.done)
-	return c.list, c.err
+	return arrivalsEntry{c.at, c.list}, c.err
+}
+
+// cachedArrivals returns the last good predictions for a stop if they are at most maxAge old,
+// whatever the TTL: the fallback when OASA or the request queue cannot answer now.
+func (a *App) cachedArrivals(id string, maxAge time.Duration) (arrivalsEntry, bool) {
+	a.arrMu.Lock()
+	defer a.arrMu.Unlock()
+	e, ok := a.arrCache[id]
+	if !ok || a.now().Sub(e.at) > maxAge {
+		return arrivalsEntry{}, false
+	}
+	return e, true
 }
 
 // stopArrivalsQueued asks OASA for a stop's predictions as a background request of the scheduler.
