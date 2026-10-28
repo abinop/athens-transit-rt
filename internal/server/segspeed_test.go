@@ -94,3 +94,37 @@ func TestLinePathSpeeds(t *testing.T) {
 		}
 	}
 }
+
+// TestPathSpeedsFollowLiveTraffic (R3): two buses that just crossed the road ahead at 15 m/s,
+// where the usual speed at this hour is 5 m/s, bring the steps ahead to 0.7×15 + 0.3×5 = 12.
+func TestPathSpeedsFollowLiveTraffic(t *testing.T) {
+	now := monday1020
+	a := newAppWith(t, sched.DefaultConfig(), func() time.Time { return now })
+	a.segs.Store(typicalTable(t, now, a.gtfsVersion()))
+	step := 300 / (geo.XY(37.98, 23.71)[0] - geo.XY(37.98, 23.70)[0]) * 0.01 // degrees for 300 m
+	for _, id := range []string{"w1", "w2"} {
+		pollOne(a, now, id, 23.72+step, now.Add(-60*time.Second))
+		pollOne(a, now, id, 23.72+3*step, now.Add(-20*time.Second)) // 600 m in 40 s
+	}
+	pollOne(a, now, "v", 23.72, now.Add(-20*time.Second))
+	now = now.Add(30 * time.Second)
+	pollOne(a, now, "v", 23.72+step, now.Add(-20*time.Second))
+	_, body := get(t, a, "/v1/lines/L")
+	var lr LineResponse
+	if err := json.Unmarshal(body, &lr); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range lr.Vehicles {
+		if v.ID != "v" {
+			continue
+		}
+		if len(v.PathSpeeds) < 3 || v.PathSpeeds[0] == nil || math.Abs(*v.PathSpeeds[0]-12) > 0.15 {
+			t.Fatalf("path_speeds %s", body)
+		}
+		if last := v.PathSpeeds[len(v.PathSpeeds)-1]; last == nil || math.Abs(*last-5) > 0.05 {
+			t.Fatalf("past the traffic the usual speed: %v", *last)
+		}
+		return
+	}
+	t.Fatalf("no vehicle v: %s", body)
+}
