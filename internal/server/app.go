@@ -131,16 +131,7 @@ func New(cfg Config, log *slog.Logger) *App {
 				IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second})
 		}
 	}
-	// The daily schedule shares the telematics budget with the scheduler's polls.
-	a.daily = func(ctx context.Context, code string) (telematics.DailySchedule, error) {
-		if err := a.pacer.Wait(ctx); err != nil {
-			return telematics.DailySchedule{}, err
-		}
-		start := time.Now()
-		d, err := a.client.DailySchedule(ctx, code)
-		a.pacer.Report(time.Since(start), err)
-		return d, err
-	}
+	a.daily = a.dailyQueued
 	a.sched = sched.New(cfg.Sched, a.pacer, a.client, a.onLine)
 	a.meta = meta.Open(filepath.Join(cfg.StateDir, "telematics-meta.json"), a.client, a.sched.Submit,
 		func() { a.refreshLines() })
@@ -676,4 +667,26 @@ func (a *App) forget() {
 		}
 	}
 	a.mu.Unlock()
+}
+
+// dailyQueued fetches OASA's daily schedule of a line code as one more background request of the
+// scheduler: it takes a request slot (budget, backoff, MaxInFlight) like the polls. A caller that
+// gives up leaves it queued; the buffered channel lets it finish without anyone reading.
+func (a *App) dailyQueued(ctx context.Context, code string) (telematics.DailySchedule, error) {
+	type answer struct {
+		d   telematics.DailySchedule
+		err error
+	}
+	ch := make(chan answer, 1)
+	a.sched.Submit(func(sctx context.Context) error {
+		d, err := a.client.DailySchedule(sctx, code)
+		ch <- answer{d, err}
+		return err
+	})
+	select {
+	case r := <-ch:
+		return r.d, r.err
+	case <-ctx.Done():
+		return telematics.DailySchedule{}, ctx.Err()
+	}
 }

@@ -111,6 +111,9 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 		a.dailyMu.Unlock()
 		select {
 		case <-c.done:
+			if c.e.day != day {
+				return telematics.DailySchedule{}, false // started before midnight: yesterday's runs
+			}
 			return c.e.d, c.e.ok
 		case <-ctx.Done():
 			return telematics.DailySchedule{}, false

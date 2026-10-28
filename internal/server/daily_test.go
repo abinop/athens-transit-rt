@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 	"github.com/angelospk/athens-transit-rt/internal/gtfs/gtfstest"
 	"github.com/angelospk/athens-transit-rt/internal/match"
 	"github.com/angelospk/athens-transit-rt/internal/meta"
@@ -180,11 +182,8 @@ func TestLineScheduleDailyCodeWithoutRoutes(t *testing.T) {
 	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R9", LineID: "L"}},
 		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}})
 	var asked []string
-	var mu sync.Mutex
 	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
-		mu.Lock()
 		asked = append(asked, code)
-		mu.Unlock()
 		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
 	}
 	get(t, a, "/v1/lines/L/schedule")
@@ -250,5 +249,74 @@ func TestLineScheduleDailyClientCancel(t *testing.T) {
 	json.Unmarshal(body, &sr)
 	if sr.Source != "oasa-daily" || calls != 1 {
 		t.Fatalf("after a cancelled client: %+v, %d calls", sr, calls)
+	}
+}
+
+// The real fetch waits for a scheduler slot: nothing reaches OASA until the scheduler runs.
+func TestDailyGoesThroughScheduler(t *testing.T) {
+	var hits atomic.Int32
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("act") == "getDailySchedule" {
+			hits.Add(1)
+			w.Write([]byte(`{"go":[{"sde_start1":"1900-01-01 09:00:00","line_descr":"A - B"}],"come":[]}`))
+			return
+		}
+		w.Write([]byte("[]"))
+	}))
+	defer fake.Close()
+	a := newApp(t, monday1020)
+	a.client.BaseURL = fake.URL + "/"
+	short, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := a.dailyQueued(short, "R1"); err == nil || hits.Load() != 0 {
+		t.Fatalf("answered without the scheduler: err %v, %d hits", err, hits.Load())
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go a.sched.Run(ctx)
+	wait, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	d, err := a.dailyQueued(wait, "R1")
+	if err != nil || len(d.Go) != 1 || d.Go[0] != "09:00" {
+		t.Fatalf("through the scheduler: %+v %v", d, err)
+	}
+}
+
+// A request after midnight that finds yesterday's fetch in flight does not take its runs as today's.
+func TestLineScheduleDailyWaiterAfterMidnight(t *testing.T) {
+	var clock atomic.Int64
+	clock.Store(time.Date(2026, 10, 5, 23, 59, 59, 0, gtfs.Athens).UnixNano())
+	a := newAppWith(t, sched.DefaultConfig(), func() time.Time { return time.Unix(0, clock.Load()) })
+	a.daily = func(context.Context, string) (telematics.DailySchedule, error) {
+		return telematics.DailySchedule{}, errors.New("unset")
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	a.daily = func(context.Context, string) (telematics.DailySchedule, error) {
+		close(started)
+		<-release
+		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/lines/L/schedule", nil))
+	}()
+	<-started
+	clock.Store(time.Date(2026, 10, 6, 0, 0, 1, 0, gtfs.Athens).UnixNano())
+	got := make(chan ScheduleResponse)
+	go func() {
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/lines/L/schedule", nil))
+		var sr ScheduleResponse
+		json.Unmarshal(rec.Body.Bytes(), &sr)
+		got <- sr
+	}()
+	time.Sleep(50 * time.Millisecond) // the second request is waiting on the first fetch
+	close(release)
+	sr := <-got
+	<-done
+	if sr.Date != "2026-10-06" || sr.Source != "gtfs" {
+		t.Fatalf("after midnight: %+v", sr)
 	}
 }
