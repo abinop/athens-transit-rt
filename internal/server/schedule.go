@@ -81,13 +81,14 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, scheduleMaxAge, resp)
 }
 
-// dailyEntry is the cached daily schedule of a line: a success lasts for its Athens day, a
-// failure (ok false) until retry.
+// dailyEntry is the cached daily schedule of a line: a full success lasts for its Athens day; a
+// failure (ok false), or a result with a line code missing (partial), until retry.
 type dailyEntry struct {
-	day   string
-	d     telematics.DailySchedule
-	ok    bool
-	retry time.Time
+	day     string
+	d       telematics.DailySchedule
+	ok      bool
+	partial bool
+	retry   time.Time
 }
 
 // dailyOfLine returns OASA's schedule of today for a line: the runs of all its line codes
@@ -98,7 +99,7 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 	a.dailyMu.Lock()
 	e, cached := a.dailyCache[line]
 	a.dailyMu.Unlock()
-	if cached && e.day == day && (e.ok || now.Before(e.retry)) {
+	if cached && e.day == day && ((e.ok && !e.partial) || now.Before(e.retry)) {
 		return e.d, e.ok
 	}
 	var codes []string
@@ -110,12 +111,14 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 		}
 	}
 	var merged telematics.DailySchedule
+	partial := false
 	for _, code := range codes {
 		cctx, cancel := context.WithTimeout(ctx, dailyTimeout)
 		d, err := a.daily(cctx, code)
 		cancel()
 		if err != nil {
 			a.log.Warn("daily schedule", "line_code", code, "err", err)
+			partial = true
 			continue
 		}
 		if merged.Descr == "" {
@@ -131,7 +134,7 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 	if !ok && ctx.Err() != nil {
 		return telematics.DailySchedule{}, false // the client left: not OASA's fault, do not cache
 	}
-	e = dailyEntry{day: day, d: merged, ok: ok, retry: now.Add(dailyNegativeTTL)}
+	e = dailyEntry{day: day, d: merged, ok: ok, partial: partial, retry: now.Add(dailyNegativeTTL)}
 	a.dailyMu.Lock()
 	if a.dailyCache == nil {
 		a.dailyCache = map[string]dailyEntry{}

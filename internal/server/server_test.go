@@ -3,8 +3,8 @@ package server
 import (
 	"compress/gzip"
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
