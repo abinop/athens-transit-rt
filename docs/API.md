@@ -20,9 +20,11 @@ The list of endpoints, their parameters and response schemas is the OpenAPI 3.1 
 [`openapi/openapi.yaml`](openapi/openapi.yaml), with an interactive reference ("try it") at
 <https://angelospk.github.io/athens-transit-rt/>. This page has usage notes and examples.
 
-Live: `/v1/lines/{line_id}`, `/v1/vehicles`, `/v1/vehicles/tiles/{z}/{x}/{y}`,
-`/v1/gtfs-rt/{vehicle_positions,trip_updates}.{pb,json}`, `/v1/status`, `/v1/stats`,
-`/v1/stats/days/{YYYY-MM-DD}`, `/healthz`. Static data (line list, shapes, stops) is on GitHub Pages:
+Live: `/v1/lines/{line_id}`, `/v1/lines/{line_id}/schedule`, `/v1/vehicles`,
+`/v1/vehicles/tiles/{z}/{x}/{y}`, `/v1/gtfs-rt/{vehicle_positions,trip_updates}.{pb,json}`,
+`/v1/status`, `/v1/stats`, `/v1/stats/days/{YYYY-MM-DD}`, `/v1/rail/stasy/departures`,
+`/v1/rail/suburban/stations`, `/v1/rail/suburban/stations/{id}/departures`, `/healthz`. Static
+data (line list, shapes, stops) is on GitHub Pages:
 `https://angelospk.github.io/athens-transit-rt/static/v1/lines.json` and
 `.../static/v1/lines/{line_id}.json`.
 
@@ -123,6 +125,78 @@ entries). Tiles exist for lat 37.5..38.5, lon 22.9..24.5 (`z` 9: x 288..290, y 1
 position. Use plain URLs: a query string gives `400`, so every client shares the cached copy.
 A map view at MapLibre zoom 13 needs 2-15 tiles of 1-8 KB (gzip) instead of the 60+ KB of
 `/v1/vehicles`. Client rules: [`CONTRACT.md`](CONTRACT.md#get-v1vehiclestileszxy-rev-5).
+
+## Schedules
+
+Three read-only endpoints add timetables to the live positions. None of them raises any polling
+priority.
+
+### Line schedule (OASA buses, trolleys)
+
+`GET /v1/lines/{line_id}/schedule` returns the trips of a line on a day, today in Athens time by
+default. `?date=YYYY-MM-DD` reads another day, up to 7 days ahead.
+
+```json
+{
+  "line": "040", "date": "2026-10-28", "expired": false,
+  "directions": [
+    {"direction": 0, "headsign": "ΠΕΙΡΑΙΑΣ",
+     "departures": [{"t": "05:30", "trip": "938_day_1_1300_0500", "seen": true}]}
+  ]
+}
+```
+
+- `t` is the departure from the trip's first stop in GTFS style: a trip after midnight shows
+  `24:10`.
+- `directions` groups the trips by `direction_id` and headsign.
+- `seen` (today only) is `true` when the matcher has assigned a vehicle to that trip since
+  midnight.
+- `expired` is `true` when the day is outside the static GTFS validity. The trips are then those
+  of the same weekday inside the feed, so the timetable may not be the one OASA runs.
+- `404 {"error":"unknown_line"}` for a line the feed does not have, `400 {"error":"bad_date"}`
+  for a malformed or out-of-range date. Cached 60 s.
+
+### Metro and tram departures (STASY)
+
+`GET /v1/rail/stasy/departures?stop=<name>&n=6` returns the next `n` (1-20, default 6)
+departures per line and headsign at every stop with that name, from now. The server loads the
+STASY GTFS (metro M1-M3, tram T6/T7) at start and checks it once a day.
+
+```json
+{"stop": "ΣΥΝΤΑΓΜΑ", "indicative": false,
+ "departures": [{"line": "M2", "route_color": "#e30613", "headsign": "ΕΛΛΗΝΙΚΟ", "t": "14:05", "in_s": 240}]}
+```
+
+- The name is matched without case, accents or final sigma: `συνταγμα`, `ΣΥΝΤΑΓΜΑ` and
+  `Σύνταγμα` are the same stop.
+- `in_s` is the seconds from now to the departure.
+- `headsign` is the feed's `trip_headsign`, or the last stop of the trip when the feed leaves it
+  empty (it leaves most of them empty).
+- `indicative: true` when the STASY timetable has expired and the same weekday inside it was
+  used instead: show those times as indicative.
+- `503 {"error":"warming_up"}` until the first load finishes, `404 {"error":"unknown_stop"}`,
+  `400 {"error":"missing_stop"}`. Cached 30 s.
+
+### Proastiakos stations and departures
+
+`GET /v1/rail/suburban/stations` lists the suburban stations with their corridors (`id`, `name`,
+`corridors`), from railway.gov.gr, cached 24 h.
+
+`GET /v1/rail/suburban/stations/{id}/departures` returns the next 10 trains at one station
+(`?n=` 1-20).
+
+```json
+{"station": "Πειραιάς",
+ "departures": [{"train": "1203", "from": "Άγιοι Ανάργυροι", "to": "Κιάτο", "t": "05:32",
+                 "delay_min": null, "platform": "4", "status": "scheduled"}]}
+```
+
+- `t` is the scheduled departure in Athens time. `status` is the state of the run (`scheduled`,
+  `in_progress`, `delayed`, `completed`); cancelled runs are left out.
+- The server keeps one cached board per day and serves it when railway.gov.gr fails. Without a
+  cached board it falls back to the ose.mpass screen of the station, for the stations whose
+  screen number is known (the Attica ones).
+- `502 {"error":"upstream_unavailable"}` when neither source answers. Cached 60 s.
 
 ## Daily statistics
 

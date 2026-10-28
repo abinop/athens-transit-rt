@@ -55,6 +55,8 @@ tags:
     description: Health and GTFS version.
   - name: Statistics
     description: Daily network statistics (servers that run with `--history`).
+  - name: Rail
+    description: Metro and tram timetable (STASY GTFS) and live suburban rail (railway.gov.gr).
   - name: Static data
     description: |
       Lines, shapes and stops, on GitHub Pages. Rebuilt only when OASA publishes a new GTFS.
@@ -573,6 +575,166 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/lines/{line_id}/schedule:
+    get:
+      tags: [Lines]
+      operationId: getLineSchedule
+      summary: Timetable of a line for one day
+      description: |
+        The line's runs from the OASA GTFS, by direction and headsign: each run's departure from
+        its first stop, GTFS style (past midnight `24:10`). For today `seen` says whether a bus of
+        that run was matched. With an expired GTFS the same weekday inside the feed is used and
+        `expired` is `true`. `Cache-Control: public, max-age=60`.
+      parameters:
+        - $ref: "#/components/parameters/LineId"
+        - name: date
+          in: query
+          required: false
+          description: Local date `YYYY-MM-DD`, today up to 7 days ahead. Default today.
+          schema: {type: string, format: date}
+      responses:
+        "200":
+          description: The timetable.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineSchedule"
+        "400":
+          description: "`bad_date`: not a date, or outside today..today+7."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404":
+          description: "`unknown_line`."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503":
+          description: "`warming_up`: the GTFS is not loaded yet."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/rail/stasy/departures:
+    get:
+      tags: [Rail]
+      operationId: getStasyDepartures
+      summary: Next metro and tram departures at a station (timetable)
+      description: |
+        From the STASY static GTFS (the open data catalogue), not live. The next `n` departures per
+        line and headsign at every stop with that name (accents and case ignored).
+        `indicative` is `true` when the date is outside the timetable's validity.
+        `Cache-Control: public, max-age=30`.
+      parameters:
+        - name: stop
+          in: query
+          required: true
+          description: Station name, e.g. `ΣΥΝΤΑΓΜΑ` or `Σύνταγμα`.
+          schema: {type: string}
+        - name: n
+          in: query
+          required: false
+          description: Departures per line and headsign, 1-20. Default 6.
+          schema: {type: integer, minimum: 1, maximum: 20}
+      responses:
+        "200":
+          description: The departures, soonest first.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StasyDepartures"
+        "400":
+          description: "`missing_stop`."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404":
+          description: "`unknown_stop`."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503":
+          description: "`warming_up`: the timetable is not loaded yet."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/rail/suburban/stations:
+    get:
+      tags: [Rail]
+      operationId: getSuburbanStations
+      summary: Suburban rail (Proastiakos) stations
+      description: "From railway.gov.gr, cached 24 h. `Cache-Control: public, max-age=3600`."
+      responses:
+        "200":
+          description: The stations with their corridors.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stations]
+                properties:
+                  stations:
+                    type: array
+                    items: {$ref: "#/components/schemas/SuburbanStation"}
+        "502":
+          description: "`upstream_unavailable`: railway.gov.gr failed and nothing is cached."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/rail/suburban/stations/{id}/departures:
+    get:
+      tags: [Rail]
+      operationId: getSuburbanDepartures
+      summary: Next suburban trains of a station (live)
+      description: |
+        From railway.gov.gr, with the ose.mpass station screens as fallback; boards cached 10 min.
+        `Cache-Control: public, max-age=60`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Station id from `/v1/rail/suburban/stations`.
+          schema: {type: string}
+        - name: n
+          in: query
+          required: false
+          description: Trains, 1-20. Default 10.
+          schema: {type: integer, minimum: 1, maximum: 20}
+      responses:
+        "200":
+          description: The next trains.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuburbanDepartures"
+        "502":
+          description: "`upstream_unavailable`: both sources failed and nothing is cached."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /static/v1/lines.json:
     servers:
       - url: https://angelospk.github.io/athens-transit-rt
@@ -669,7 +831,7 @@ components:
       properties:
         error:
           type: string
-          enum: [unknown_line, not_found, warming_up, feed_unavailable, query_not_allowed, bad_date, internal]
+          enum: [unknown_line, not_found, warming_up, feed_unavailable, query_not_allowed, bad_date, internal, missing_stop, unknown_stop, upstream_unavailable]
 
     LatLon:
       type: array
@@ -1133,3 +1295,77 @@ components:
               name: {type: string}
               lat: {type: number}
               lon: {type: number}
+
+    LineSchedule:
+      type: object
+      required: [line, date, expired, directions]
+      properties:
+        line: {type: string}
+        date: {type: string, format: date}
+        expired:
+          type: boolean
+          description: The GTFS has expired; the times are the same weekday of the old timetable.
+        directions:
+          type: array
+          items:
+            type: object
+            required: [direction, headsign, departures]
+            properties:
+              direction: {type: integer, enum: [0, 1]}
+              headsign: {type: string}
+              departures:
+                type: array
+                items:
+                  type: object
+                  required: [t, trip]
+                  properties:
+                    t: {type: string, description: "Departure from the first stop, `HH:MM`, may pass 24:00."}
+                    trip: {type: string}
+                    seen: {type: boolean, description: "Today only: a bus of this run was matched."}
+
+    StasyDepartures:
+      type: object
+      required: [stop, indicative, departures]
+      properties:
+        stop: {type: string}
+        indicative: {type: boolean}
+        departures:
+          type: array
+          items:
+            type: object
+            required: [line, route_color, headsign, t, in_s]
+            properties:
+              line: {type: string, example: M2}
+              route_color: {type: string, example: "#e30613"}
+              headsign: {type: string}
+              t: {type: string, description: "`HH:MM`, may pass 24:00."}
+              in_s: {type: integer, description: Seconds from now.}
+
+    SuburbanStation:
+      type: object
+      required: [id, name, corridors]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        corridors:
+          type: array
+          items: {type: string}
+
+    SuburbanDepartures:
+      type: object
+      required: [station, departures]
+      properties:
+        station: {type: string}
+        departures:
+          type: array
+          items:
+            type: object
+            required: [train, from, to, t, delay_min, platform, status]
+            properties:
+              train: {type: string}
+              from: {type: string}
+              to: {type: string}
+              t: {type: string, description: "Scheduled time, `HH:MM` Athens local."}
+              delay_min: {type: [integer, "null"]}
+              platform: {type: [string, "null"]}
+              status: {type: string}

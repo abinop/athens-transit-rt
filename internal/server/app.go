@@ -23,6 +23,7 @@ import (
 	"github.com/angelospk/athens-transit-rt/internal/history"
 	"github.com/angelospk/athens-transit-rt/internal/match"
 	"github.com/angelospk/athens-transit-rt/internal/meta"
+	"github.com/angelospk/athens-transit-rt/internal/rail"
 	"github.com/angelospk/athens-transit-rt/internal/release"
 	"github.com/angelospk/athens-transit-rt/internal/sched"
 	"github.com/angelospk/athens-transit-rt/internal/segspeed"
@@ -44,6 +45,9 @@ type Config struct {
 	ReleaseURL    string        // snapshot release base URL ("" = release.DefaultBaseURL)
 	GTFSZip       string        // load this zip instead of the release snapshot (local use)
 	TelematicsURL string        // "" = telematics.BaseURL
+	STASYURL      string        // STASY timetable catalogue ("" = rail.DefaultSTASYCatalog)
+	SuburbanURL   string        // railway.gov.gr base URL ("" = rail.DefaultRailwayURL)
+	MPassURL      string        // ose.mpass.ltd API base URL ("" = rail.DefaultMPassURL)
 	Proxy         string        // proxy URL for OASA requests, e.g. socks5h://127.0.0.1:40001 ("" = direct)
 	ReleaseCheck  time.Duration // how often to look for a new snapshot
 	Sched         sched.Config
@@ -100,6 +104,13 @@ type App struct {
 
 	hist *history.Writer                // nil: no fix history
 	segs atomic.Pointer[segspeed.Table] // typical speeds from the history; nil until built
+
+	stasy    *rail.STASYStore
+	suburban *rail.Suburban
+
+	seenMu  sync.Mutex
+	seen    map[string]bool // trips the matcher has assigned a vehicle to, today
+	seenDay string
 }
 
 func New(cfg Config, log *slog.Logger) *App {
@@ -123,6 +134,16 @@ func New(cfg Config, log *slog.Logger) *App {
 		base = release.DefaultBaseURL
 	}
 	a.fetch = &release.Fetcher{BaseURL: base, Dir: cfg.StateDir, HTTP: &http.Client{Timeout: 2 * time.Minute}}
+	stasyURL := cfg.STASYURL
+	if stasyURL == "" {
+		stasyURL = rail.DefaultSTASYCatalog
+	}
+	a.stasy = &rail.STASYStore{CatalogURL: stasyURL, Dir: filepath.Join(cfg.StateDir, "stasy"),
+		HTTP: &http.Client{Timeout: 5 * time.Minute}, Log: log, Now: func() time.Time { return a.now() }}
+	a.suburban = &rail.Suburban{BaseURL: cfg.SuburbanURL, MPassURL: cfg.MPassURL,
+		// Well under the 30 s WriteTimeout of the HTTP server: the MPass fallback and the response
+		// still have to fit after a dead primary upstream.
+		HTTP: &http.Client{Timeout: 8 * time.Second}, Now: func() time.Time { return a.now() }}
 	return a
 }
 
@@ -135,6 +156,9 @@ func (a *App) SetFeed(f *gtfs.Feed, m *release.Manifest) {
 	a.w = w
 	a.mu.Unlock()
 	a.motion = newMotion() // positions along the old feed's shapes mean nothing now
+	// Trip ids of the old feed mean nothing either. Cleared before matchMu opens, so a poll that
+	// starts right after cannot record its matches into a map that is dropped a moment later.
+	a.forgetSeen()
 	a.matchMu.Unlock()
 	a.vehMu.Lock()
 	a.vehSnap = nil
@@ -259,6 +283,7 @@ func (a *App) onLine(p sched.LinePoll) {
 		return
 	}
 	results := w.matcher.MatchLine(p.Line, p.Obs)
+	a.noteSeen(w, results, p.Done)
 	vehicles := make([]Vehicle, len(results))
 	ver := ""
 	if a.hist != nil {
@@ -514,6 +539,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	go a.sched.Run(ctx)
 	go a.housekeeping(ctx)
+	go a.stasy.Run(ctx)
 	a.log.Info("listening", "addr", a.cfg.Listen, "metrics", a.cfg.MetricsListen, "rps", a.pacer.BaseRPS())
 	select {
 	case <-ctx.Done():

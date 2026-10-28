@@ -44,10 +44,14 @@ type StatusResponse struct {
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/lines/{id}", a.handleLine)
+	mux.HandleFunc("GET /v1/lines/{id}/schedule", a.handleSchedule)
 	mux.HandleFunc("GET /v1/status", a.handleStatus)
 	mux.HandleFunc("GET /v1/vehicles", a.handleVehicles)
 	mux.HandleFunc("GET /v1/vehicles/tiles/{z}/{x}/{y}", a.handleTile)
 	mux.HandleFunc("GET /v1/gtfs-rt/{name}", a.handleGTFSRT)
+	mux.HandleFunc("GET /v1/rail/stasy/departures", a.handleSTASYDepartures)
+	mux.HandleFunc("GET /v1/rail/suburban/stations", a.handleSuburbanStations)
+	mux.HandleFunc("GET /v1/rail/suburban/stations/{id}/departures", a.handleSuburbanDepartures)
 	mux.HandleFunc("GET /v1/stats", a.handleStatsIndex)
 	mux.HandleFunc("GET /v1/stats/days/{date}", a.handleStatsDay)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

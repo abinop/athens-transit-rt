@@ -27,6 +27,9 @@ func serve(args []string) error {
 	releaseURL := fs.String("release-url", "", "snapshot release base URL (default: this repo's gtfs-snapshot release)")
 	gtfsZip := fs.String("gtfs", "", "load this GTFS zip instead of the release snapshot (local use)")
 	telURL := fs.String("telematics-url", "", "OASA telematics API base URL")
+	stasyURL := fs.String("stasy-url", "", "STASY (metro, tram) timetable catalogue (default: the Growthfund CKAN dataset)")
+	suburbanURL := fs.String("suburban-url", "", "railway.gov.gr base URL for Proastiakos boards")
+	mpassURL := fs.String("mpass-url", "", "ose.mpass.ltd API base URL (Proastiakos board fallback)")
 	proxy := fs.String("proxy", "", "proxy for OASA requests, e.g. socks5h://127.0.0.1:40001 (empty = direct)")
 	check := fs.Duration("release-check", 30*time.Minute, "how often to look for a new snapshot")
 	hist := fs.Bool("history", false, "keep every new GPS fix in <state>/history (hourly CSV, gzipped)")
@@ -57,6 +60,7 @@ func serve(args []string) error {
 	}
 	app := server.New(server.Config{Listen: *listen, MetricsListen: *metricsListen, StateDir: *state, RPS: *rps, Matcher: kind,
 		ReleaseURL: *releaseURL, GTFSZip: *gtfsZip, TelematicsURL: *telURL, Proxy: *proxy, ReleaseCheck: *check, HistoryMaxBytes: histBytes,
+		STASYURL: *stasyURL, SuburbanURL: *suburbanURL, MPassURL: *mpassURL,
 		Sched: sched.DefaultConfig(), HistoryKeep: time.Duration(*histDays) * 24 * time.Hour}, log)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
