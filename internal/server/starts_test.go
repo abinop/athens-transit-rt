@@ -97,7 +97,7 @@ func TestRunStartShortShape(t *testing.T) {
 
 func TestAtTerminus(t *testing.T) {
 	ends := []geo.Cand{{Along: 20}, {Along: 4980}}
-	if !atTerminus(ends, 5000) || atTerminus([]geo.Cand{{Along: 20}, {Along: 2500}}, 5000) || atTerminus(nil, 5000) {
+	if !atTerminus(ends, 5000) || atTerminus([]geo.Cand{{Along: 20}, {Along: 2500}}, 5000) || atTerminus(nil, 5000) || atTerminus([]geo.Cand{{Along: 4980}}, 5000) {
 		t.Fatal("terminus")
 	}
 }

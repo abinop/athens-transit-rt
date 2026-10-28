@@ -97,12 +97,14 @@ func (rs *runStarts) observe(feed *gtfs.Feed, vehicle, line string, shape int32,
 // atTerminus tells whether every place a fix may be on a shape (length metres) is at one of its
 // ends: on a loop the start and the end are one place, so the fix is at the start, not ambiguous.
 func atTerminus(cands []geo.Cand, length float64) bool {
+	atStart := false
 	for _, c := range cands {
 		if c.Along > startNearM && c.Along < length-startNearM {
 			return false
 		}
+		atStart = atStart || c.Along <= startNearM
 	}
-	return len(cands) > 0
+	return atStart
 }
 
 // of returns the starts of a shape of line (of feed) today (the Athens day of now) in time order,
@@ -133,7 +135,7 @@ func markSeen(deps []ScheduleDeparture, day time.Time, starts []time.Time, since
 		if !ok {
 			continue
 		}
-		t := day.Add(time.Duration(m) * time.Minute)
+		t := time.Date(day.Year(), day.Month(), day.Day(), 0, m, 0, 0, day.Location()) // wall clock: DST days too
 		if t.After(now) {
 			continue
 		}
