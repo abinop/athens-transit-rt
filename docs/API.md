@@ -292,6 +292,26 @@ docker run --rm -v "$PWD/rt:/w" --entrypoint java ghcr.io/mobilitydata/gtfs-real
 # results: rt/vp/*.pb.results.json (empty list = no errors and no warnings)
 ```
 
+## MCP (assistants)
+
+A read-only [Model Context Protocol](https://modelcontextprotocol.io) server lets Claude, ChatGPT
+and other assistants ask about the buses directly. URL: `https://<host>/mcp` (Streamable HTTP,
+stateless, no authentication, read-only). Names are Greek, times are Europe/Athens.
+
+| Tool | Returns |
+|---|---|
+| `search_lines` | lines whose number or name contains the text (accents and case ignored), up to 20 |
+| `line_now` | live buses of a line with delay and next stop name |
+| `line_timetable` | departures of a line for a day (default today) |
+| `find_stops` | stops whose name contains the text, with id and position, up to 15 |
+| `stop_arrivals` | OASA's own predictions at a stop (minutes, line, vehicle), cached 30 s |
+| `network_day` | statistics of a day: speed, trips run and missed, slowest and most-missed lines |
+| `suburban_departures` | next Proastiakos trains at a station, live |
+| `metro_departures` | next metro and tram departures at a station (STASY timetable) |
+
+- Claude: Settings > Connectors > Add custom connector, and paste the URL.
+- ChatGPT: turn on developer mode, add a connector (MCP server) and paste the URL.
+
 ## Errors and limits
 
 | Status | Body | Meaning |

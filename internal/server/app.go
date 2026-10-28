@@ -16,6 +16,7 @@ import (
 	"time"
 
 	rt "github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/angelospk/athens-transit-rt/internal/feed"
 	"github.com/angelospk/athens-transit-rt/internal/geo"
@@ -116,6 +117,15 @@ type App struct {
 	dailyMu    sync.Mutex // guards dailyCache only; never held during a request
 	dailyCache map[string]dailyEntry
 	dailyCalls map[string]*dailyCall // fetches in flight, by line
+
+	stopArrivals func(ctx context.Context, stopCode string) ([]telematics.Arrival, error)
+	arrMu        sync.Mutex // guards arrCache only; never held during a request
+	arrCache     map[string]arrivalsEntry
+
+	mcpOnce    sync.Once
+	mcpSrv     *mcp.Server
+	apiOnce    sync.Once
+	apiHandler http.Handler // the app's own REST handler, for the MCP tools
 }
 
 func New(cfg Config, log *slog.Logger) *App {
@@ -132,6 +142,7 @@ func New(cfg Config, log *slog.Logger) *App {
 		}
 	}
 	a.daily = a.dailyQueued
+	a.stopArrivals = a.stopArrivalsQueued
 	a.sched = sched.New(cfg.Sched, a.pacer, a.client, a.onLine)
 	a.meta = meta.Open(filepath.Join(cfg.StateDir, "telematics-meta.json"), a.client, a.sched.Submit,
 		func() { a.refreshLines() })
@@ -669,24 +680,32 @@ func (a *App) forget() {
 	a.mu.Unlock()
 }
 
-// dailyQueued fetches OASA's daily schedule of a line code as one more background request of the
-// scheduler: it takes a request slot (budget, backoff, MaxInFlight) like the polls. A caller that
-// gives up leaves it queued; the buffered channel lets it finish without anyone reading.
-func (a *App) dailyQueued(ctx context.Context, code string) (telematics.DailySchedule, error) {
+// queued runs one OASA call as a background request of the scheduler: it takes a request slot
+// (budget, backoff, MaxInFlight) like the polls. A caller that gives up leaves it queued; the
+// buffered channel lets it finish without anyone reading.
+func queued[T any](ctx context.Context, a *App, call func(ctx context.Context) (T, error)) (T, error) {
 	type answer struct {
-		d   telematics.DailySchedule
+		v   T
 		err error
 	}
 	ch := make(chan answer, 1)
 	a.sched.Submit(func(sctx context.Context) error {
-		d, err := a.client.DailySchedule(sctx, code)
-		ch <- answer{d, err}
+		v, err := call(sctx)
+		ch <- answer{v, err}
 		return err
 	})
 	select {
 	case r := <-ch:
-		return r.d, r.err
+		return r.v, r.err
 	case <-ctx.Done():
-		return telematics.DailySchedule{}, ctx.Err()
+		var zero T
+		return zero, ctx.Err()
 	}
+}
+
+// dailyQueued fetches OASA's daily schedule of a line code through queued.
+func (a *App) dailyQueued(ctx context.Context, code string) (telematics.DailySchedule, error) {
+	return queued(ctx, a, func(sctx context.Context) (telematics.DailySchedule, error) {
+		return a.client.DailySchedule(sctx, code)
+	})
 }

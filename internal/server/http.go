@@ -54,6 +54,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/rail/suburban/stations/{id}/departures", a.handleSuburbanDepartures)
 	mux.HandleFunc("GET /v1/stats", a.handleStatsIndex)
 	mux.HandleFunc("GET /v1/stats/days/{date}", a.handleStatsDay)
+	mux.Handle("/mcp", a.mcpHandler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write([]byte("ok\n"))
