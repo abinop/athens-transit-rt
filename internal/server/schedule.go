@@ -329,5 +329,4 @@ func (a *App) forgetSeen() {
 	a.seenMu.Lock()
 	a.seen, a.seenDay = map[string]bool{}, ""
 	a.seenMu.Unlock()
-	a.starts.forget()
 }

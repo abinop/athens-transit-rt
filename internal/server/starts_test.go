@@ -7,6 +7,8 @@ import (
 	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 )
 
+var feedA, feedB = &gtfs.Feed{}, &gtfs.Feed{}
+
 func at(hhmm string) time.Time {
 	t, err := time.ParseInLocation("2006-01-02 15:04", "2026-10-28 "+hhmm, gtfs.Athens)
 	if err != nil {
@@ -17,11 +19,11 @@ func at(hhmm string) time.Time {
 
 func TestRunStartFromNearToAway(t *testing.T) {
 	rs := newRunStarts()
-	rs.observe("v1", "040", 3, 40, at("10:00"))
-	rs.observe("v1", "040", 3, 120, at("10:02")) // still at the start (waiting, creeping)
-	rs.observe("v1", "040", 3, 900, at("10:05"))
-	rs.observe("v1", "040", 3, 2500, at("10:09")) // the same run: no second start
-	got, _ := rs.of("040", 3, at("12:00"))
+	rs.observe(feedA, "v1", "040", 3, 40, 9000, at("10:00"))
+	rs.observe(feedA, "v1", "040", 3, 120, 9000, at("10:02")) // still at the start (waiting, creeping)
+	rs.observe(feedA, "v1", "040", 3, 900, 9000, at("10:05"))
+	rs.observe(feedA, "v1", "040", 3, 2500, 9000, at("10:09")) // the same run: no second start
+	got, _ := rs.of(feedA, "040", 3, at("12:00"))
 	if len(got) != 1 || !got[0].Equal(at("10:02")) {
 		t.Fatalf("starts %v", got)
 	}
@@ -29,25 +31,25 @@ func TestRunStartFromNearToAway(t *testing.T) {
 
 func TestRunStartNeedsTheStart(t *testing.T) {
 	rs := newRunStarts()
-	rs.observe("v1", "040", 3, 900, at("10:05")) // first seen mid-run: when it left is unknown
-	rs.observe("v1", "040", 3, 2500, at("10:09"))
-	rs.observe("v2", "040", 3, 50, at("10:00"))
-	rs.observe("v2", "040", 3, 900, at("10:40")) // too long apart to be one departure
-	if got, _ := rs.of("040", 3, at("12:00")); len(got) != 0 {
+	rs.observe(feedA, "v1", "040", 3, 900, 9000, at("10:05")) // first seen mid-run: when it left is unknown
+	rs.observe(feedA, "v1", "040", 3, 2500, 9000, at("10:09"))
+	rs.observe(feedA, "v2", "040", 3, 50, 9000, at("10:00"))
+	rs.observe(feedA, "v2", "040", 3, 900, 9000, at("10:40")) // too long apart to be one departure
+	if got, _ := rs.of(feedA, "040", 3, at("12:00")); len(got) != 0 {
 		t.Fatalf("starts %v", got)
 	}
 }
 
 func TestRunStartNextRunAndOtherShape(t *testing.T) {
 	rs := newRunStarts()
-	rs.observe("v1", "040", 3, 50, at("10:00"))
-	rs.observe("v1", "040", 3, 900, at("10:03"))
-	rs.observe("v1", "040", 4, 30, at("11:00")) // back: the other direction
-	rs.observe("v1", "040", 4, 700, at("11:04"))
-	rs.observe("v1", "040", 3, 10, at("12:00")) // and its next run of the first one
-	rs.observe("v1", "040", 3, 800, at("12:02"))
-	a, _ := rs.of("040", 3, at("13:00"))
-	b, _ := rs.of("040", 4, at("13:00"))
+	rs.observe(feedA, "v1", "040", 3, 50, 9000, at("10:00"))
+	rs.observe(feedA, "v1", "040", 3, 900, 9000, at("10:03"))
+	rs.observe(feedA, "v1", "040", 4, 30, 9000, at("11:00")) // back: the other direction
+	rs.observe(feedA, "v1", "040", 4, 700, 9000, at("11:04"))
+	rs.observe(feedA, "v1", "040", 3, 10, 9000, at("12:00")) // and its next run of the first one
+	rs.observe(feedA, "v1", "040", 3, 800, 9000, at("12:02"))
+	a, _ := rs.of(feedA, "040", 3, at("13:00"))
+	b, _ := rs.of(feedA, "040", 4, at("13:00"))
 	if len(a) != 2 || !a[1].Equal(at("12:00")) || len(b) != 1 || !b[0].Equal(at("11:00")) {
 		t.Fatalf("shape 3 %v shape 4 %v", a, b)
 	}
@@ -55,15 +57,75 @@ func TestRunStartNextRunAndOtherShape(t *testing.T) {
 
 func TestRunStartsOfToday(t *testing.T) {
 	rs := newRunStarts()
-	rs.observe("v1", "040", 3, 50, at("10:00"))
-	rs.observe("v1", "040", 3, 900, at("10:03"))
+	rs.observe(feedA, "v1", "040", 3, 50, 9000, at("10:00"))
+	rs.observe(feedA, "v1", "040", 3, 900, 9000, at("10:03"))
 	next := at("10:00").AddDate(0, 0, 1)
-	if got, _ := rs.of("040", 3, next); len(got) != 0 {
+	if got, _ := rs.of(feedA, "040", 3, next); len(got) != 0 {
 		t.Fatalf("yesterday's starts: %v", got)
 	}
-	rs.observe("v2", "040", 3, 50, next)
-	if _, since := rs.of("040", 3, next); !since.Equal(next) {
+	rs.observe(feedA, "v2", "040", 3, 50, 9000, next)
+	if _, since := rs.of(feedA, "040", 3, next); !since.Equal(next) {
 		t.Fatalf("watched since %v", since)
+	}
+}
+
+func TestRunStartLoopLine(t *testing.T) {
+	// A loop: its start and its end are the same place, so a bus waiting there may be put at the end.
+	rs := newRunStarts()
+	rs.observe(feedA, "v1", "040", 3, 4900, 5000, at("10:00"))
+	rs.observe(feedA, "v1", "040", 3, 4950, 5000, at("10:02"))
+	rs.observe(feedA, "v1", "040", 3, 700, 5000, at("10:05"))
+	// A bus turning back at the end on the same shape did not start a run.
+	rs.observe(feedA, "v2", "040", 3, 4900, 5000, at("10:00"))
+	rs.observe(feedA, "v2", "040", 3, 4200, 5000, at("10:03"))
+	got, _ := rs.of(feedA, "040", 3, at("12:00"))
+	if len(got) != 1 || !got[0].Equal(at("10:02")) {
+		t.Fatalf("starts %v", got)
+	}
+}
+
+func TestRunStartsLateFixOfYesterday(t *testing.T) {
+	rs := newRunStarts()
+	today := at("00:05").AddDate(0, 0, 1)
+	rs.observe(feedA, "v1", "040", 3, 50, 9000, today)
+	rs.observe(feedA, "v1", "040", 3, 900, 9000, today.Add(3*time.Minute))
+	rs.observe(feedA, "v2", "040", 3, 50, 9000, at("23:59")) // an old fix, polled late
+	if got, since := rs.of(feedA, "040", 3, today.Add(time.Hour)); len(got) != 1 || !since.Equal(today) {
+		t.Fatalf("starts %v since %v", got, since)
+	}
+}
+
+func TestRunStartOldFixOfTheVehicle(t *testing.T) {
+	rs := newRunStarts()
+	rs.observe(feedA, "v1", "040", 3, 50, 9000, at("10:00"))
+	rs.observe(feedA, "v1", "040", 3, 900, 9000, at("10:03"))
+	rs.observe(feedA, "v1", "040", 3, 50, 9000, at("10:01")) // out of order: not at the start again
+	rs.observe(feedA, "v1", "040", 3, 1500, 9000, at("10:04"))
+	if got, _ := rs.of(feedA, "040", 3, at("12:00")); len(got) != 1 {
+		t.Fatalf("starts %v", got)
+	}
+}
+
+func TestRunStartsOfAnotherFeed(t *testing.T) {
+	rs := newRunStarts()
+	rs.observe(feedA, "v1", "040", 3, 50, 9000, at("10:00"))
+	rs.observe(feedA, "v1", "040", 3, 900, 9000, at("10:03"))
+	if got, _ := rs.of(feedB, "040", 3, at("12:00")); len(got) != 0 {
+		t.Fatalf("shape 3 of another feed: %v", got)
+	}
+	rs.observe(feedB, "v2", "040", 3, 50, 9000, at("11:00"))
+	if got, _ := rs.of(feedB, "040", 3, at("12:00")); len(got) != 0 {
+		t.Fatalf("the old feed's starts: %v", got)
+	}
+}
+
+func TestMarkSeenRightAfterTheStart(t *testing.T) {
+	// Watched since 10:00: the 10:01 run left at 10:01 (seen); 10:02 had no bus, but one may have
+	// left early, before 10:00: unknown.
+	d := deps("10:01", "10:02")
+	markSeen(d, at("00:00"), []time.Time{at("10:01")}, at("10:00"), at("11:00"))
+	if got := seenOf(d); !equal(got, []string{"y", "?"}) {
+		t.Fatalf("seen %v", got)
 	}
 }
 

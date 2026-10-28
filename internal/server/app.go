@@ -397,7 +397,7 @@ func (a *App) motionOf(w *world, r *match.Result, shape int32) (speed *float64, 
 				stops = g.StopAlong[:1]
 			}
 			speed = a.motion.observeAs(r.VehicleID, g.Line, r.Along, r.Time, !r.Waiting)
-			a.starts.observe(r.VehicleID, r.Line, shape, r.Along, r.Time)
+			a.starts.observe(w.feed, r.VehicleID, r.Line, shape, r.Along, g.Line.Length(), r.Time)
 			path, beyond, at = pathAhead(g.Line, r.Along, speed, stops)
 			if tab := a.segs.Load(); shape >= 0 && !r.Waiting && tab.Feed() == worldVersion(w) {
 				steps = tab.Steps(w.feed.Shapes[shape].ID, r.Along, g.Line.Length(), segspeed.Slot(r.Time, gtfs.Athens), stepFallback(speed))
@@ -420,7 +420,7 @@ func (a *App) motionOf(w *world, r *match.Result, shape int32) (speed *float64, 
 		return nil, nil, nil, nil, nil
 	}
 	speed = a.motion.observeAs(r.VehicleID, line, s, r.Time, !r.Waiting)
-	a.starts.observe(r.VehicleID, r.Line, shape, s, r.Time)
+	a.starts.observe(w.feed, r.VehicleID, r.Line, shape, s, line.Length(), r.Time)
 	path, _, _ = pathAhead(line, s, speed, nil)
 	return speed, path, nil, nil, nil
 }

@@ -29,62 +29,77 @@ type startKey struct {
 }
 
 type startState struct {
-	key  startKey
-	near time.Time // last fix near the start; zero once the run is counted
+	key     startKey
+	last    time.Time // the newest fix: older ones come late and are dropped
+	near    time.Time // last fix near the start; zero once the run is counted
+	nearEnd bool      // ...put at the shape's end: a loop, whose end is its start
 }
 
 // A nil runStarts watches nothing.
 type runStarts struct {
 	mu    sync.Mutex
-	day   string    // Athens date of the starts
-	since time.Time // the first fix of the day: what left before it was not watched
+	feed  *gtfs.Feed // the feed whose shape indexes the keys are
+	day   string     // Athens date of the starts
+	since time.Time  // the first fix of the day: what left before it was not watched
 	veh   map[string]*startState
 	got   map[startKey][]time.Time
 }
 
 func newRunStarts() *runStarts { return &runStarts{} }
 
-func (rs *runStarts) reset(day string, t time.Time) {
-	rs.day, rs.since = day, t
+func (rs *runStarts) reset(feed *gtfs.Feed, day string, t time.Time) {
+	rs.feed, rs.day, rs.since = feed, day, t
 	rs.veh, rs.got = map[string]*startState{}, map[startKey][]time.Time{}
 }
 
-// observe takes one fix of a vehicle: s metres along shape of line, at t.
-func (rs *runStarts) observe(vehicle, line string, shape int32, s float64, t time.Time) {
+// observe takes one fix of a vehicle: s metres along shape of line (length metres long, of feed),
+// at t. A fix of an earlier day than the starts, or older than the vehicle's newest, is dropped.
+func (rs *runStarts) observe(feed *gtfs.Feed, vehicle, line string, shape int32, s, length float64, t time.Time) {
 	if rs == nil || shape < 0 {
 		return
 	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if day := t.In(gtfs.Athens).Format(time.DateOnly); day != rs.day {
-		rs.reset(day, t)
+	day := t.In(gtfs.Athens).Format(time.DateOnly)
+	switch {
+	case feed != rs.feed || day > rs.day:
+		rs.reset(feed, day, t)
+	case day < rs.day:
+		return
 	}
 	k := startKey{line, shape}
 	st := rs.veh[vehicle]
+	if st != nil && !t.After(st.last) {
+		return
+	}
 	if st == nil || st.key != k {
 		st = &startState{key: k}
 		rs.veh[vehicle] = st
 	}
+	st.last = t
 	switch {
 	case s <= startNearM:
-		st.near = t
+		st.near, st.nearEnd = t, false
+	case length >= 2*startAwayM && s >= length-startNearM:
+		st.near, st.nearEnd = t, true
 	case s >= startAwayM && !st.near.IsZero():
-		if t.Sub(st.near) <= startMaxGap {
+		// From the end, only a bus at the line's start again left: one turning back has the end behind.
+		if t.Sub(st.near) <= startMaxGap && (!st.nearEnd || s <= length/2) {
 			rs.got[k] = append(rs.got[k], st.near)
 		}
 		st.near = time.Time{}
 	}
 }
 
-// of returns the starts of a shape of line today (the Athens day of now) in time order, and since
-// when the starts were watched.
-func (rs *runStarts) of(line string, shape int32, now time.Time) ([]time.Time, time.Time) {
+// of returns the starts of a shape of line (of feed) today (the Athens day of now) in time order,
+// and since when the starts were watched.
+func (rs *runStarts) of(feed *gtfs.Feed, line string, shape int32, now time.Time) ([]time.Time, time.Time) {
 	if rs == nil {
 		return nil, now
 	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if rs.day != now.In(gtfs.Athens).Format(time.DateOnly) {
+	if rs.feed != feed || rs.day != now.In(gtfs.Athens).Format(time.DateOnly) {
 		return nil, now
 	}
 	got := append([]time.Time(nil), rs.got[startKey{line, shape}]...)
@@ -92,20 +107,10 @@ func (rs *runStarts) of(line string, shape int32, now time.Time) ([]time.Time, t
 	return got, rs.since
 }
 
-// forget drops everything: the shape indexes belong to a feed that was replaced.
-func (rs *runStarts) forget() {
-	if rs == nil {
-		return
-	}
-	rs.mu.Lock()
-	rs.day = ""
-	rs.mu.Unlock()
-}
-
 // markSeen sets the seen flags of the runs of one direction on day (Athens midnight), in time
 // order, from the starts of its buses (sorted): a run takes the first unused start from seenEarly
 // before to seenLate after its time. A run without one is missed once seenLate has passed, and
-// unknown before that or when it was due before since (not watched).
+// unknown before that or when it may have left before since (not watched).
 func markSeen(deps []ScheduleDeparture, day time.Time, starts []time.Time, since, now time.Time) {
 	used := make([]bool, len(starts))
 	for i := range deps {
@@ -115,7 +120,7 @@ func markSeen(deps []ScheduleDeparture, day time.Time, starts []time.Time, since
 			continue
 		}
 		t := day.Add(time.Duration(m) * time.Minute)
-		if t.Add(-seenEarly).Before(since) || t.After(now) {
+		if t.After(now) {
 			continue
 		}
 		seen := false
@@ -129,7 +134,7 @@ func markSeen(deps []ScheduleDeparture, day time.Time, starts []time.Time, since
 			used[k], seen = true, true
 			break
 		}
-		if seen || !now.Before(t.Add(seenLate)) {
+		if seen || (!t.Add(-seenEarly).Before(since) && !now.Before(t.Add(seenLate))) {
 			deps[i].Seen = &seen
 		}
 	}
@@ -184,7 +189,7 @@ func (a *App) markDailySeen(f *gtfs.Feed, line string, resp *ScheduleResponse, t
 			if !endMatches(head, d.Headsign) {
 				continue
 			}
-			got, s := a.starts.of(line, shape, now)
+			got, s := a.starts.of(f, line, shape, now)
 			starts = append(starts, got...)
 			since = s
 		}
