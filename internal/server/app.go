@@ -415,8 +415,12 @@ func (a *App) motionOf(w *world, r *match.Result, shape int32) (speed *float64, 
 	if len(line.XY) < 2 {
 		return nil, nil, nil, nil, nil
 	}
-	s, ok := a.motion.pick(r.VehicleID, line, line.Candidates(pos[0], pos[1], motionMaxOffM, r.Bearing, r.Bearing != 0), r.Time)
+	cands := line.Candidates(pos[0], pos[1], motionMaxOffM, r.Bearing, r.Bearing != 0)
+	s, ok := a.motion.pick(r.VehicleID, line, cands, r.Time)
 	if !ok {
+		if atTerminus(cands, line.Length()) { // a loop's start, put at both of its ends
+			a.starts.observe(w.feed, r.VehicleID, r.Line, shape, 0, line.Length(), r.Time)
+		}
 		return nil, nil, nil, nil, nil
 	}
 	speed = a.motion.observeAs(r.VehicleID, line, s, r.Time, !r.Waiting)

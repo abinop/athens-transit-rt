@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/angelospk/athens-transit-rt/internal/geo"
 	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 )
 
@@ -81,6 +82,23 @@ func TestRunStartLoopLine(t *testing.T) {
 	got, _ := rs.of(feedA, "040", 3, at("12:00"))
 	if len(got) != 1 || !got[0].Equal(at("10:02")) {
 		t.Fatalf("starts %v", got)
+	}
+}
+
+func TestRunStartShortShape(t *testing.T) {
+	// 1200 m: 1000 m along is both away from the start and near the end. A bus that left counts.
+	rs := newRunStarts()
+	rs.observe(feedA, "v1", "040", 3, 50, 1200, at("10:00"))
+	rs.observe(feedA, "v1", "040", 3, 1000, 1200, at("10:03"))
+	if got, _ := rs.of(feedA, "040", 3, at("12:00")); len(got) != 1 {
+		t.Fatalf("starts %v", got)
+	}
+}
+
+func TestAtTerminus(t *testing.T) {
+	ends := []geo.Cand{{Along: 20}, {Along: 4980}}
+	if !atTerminus(ends, 5000) || atTerminus([]geo.Cand{{Along: 20}, {Along: 2500}}, 5000) || atTerminus(nil, 5000) {
+		t.Fatal("terminus")
 	}
 }
 

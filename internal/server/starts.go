@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/angelospk/athens-transit-rt/internal/geo"
 	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 	"github.com/angelospk/athens-transit-rt/internal/rail"
 )
@@ -80,15 +81,28 @@ func (rs *runStarts) observe(feed *gtfs.Feed, vehicle, line string, shape int32,
 	switch {
 	case s <= startNearM:
 		st.near, st.nearEnd = t, false
-	case length >= 2*startAwayM && s >= length-startNearM:
-		st.near, st.nearEnd = t, true
-	case s >= startAwayM && !st.near.IsZero():
+	case s >= startAwayM && !st.near.IsZero() && (!st.nearEnd || s <= length/2):
 		// From the end, only a bus at the line's start again left: one turning back has the end behind.
-		if t.Sub(st.near) <= startMaxGap && (!st.nearEnd || s <= length/2) {
+		if t.Sub(st.near) <= startMaxGap {
 			rs.got[k] = append(rs.got[k], st.near)
 		}
 		st.near = time.Time{}
+	case length >= 2*startAwayM && s >= length-startNearM:
+		st.near, st.nearEnd = t, true
+	case s >= startAwayM:
+		st.near = time.Time{} // turned back from the end
 	}
+}
+
+// atTerminus tells whether every place a fix may be on a shape (length metres) is at one of its
+// ends: on a loop the start and the end are one place, so the fix is at the start, not ambiguous.
+func atTerminus(cands []geo.Cand, length float64) bool {
+	for _, c := range cands {
+		if c.Along > startNearM && c.Along < length-startNearM {
+			return false
+		}
+	}
+	return len(cands) > 0
 }
 
 // of returns the starts of a shape of line (of feed) today (the Athens day of now) in time order,
