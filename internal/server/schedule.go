@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/angelospk/athens-transit-rt/internal/gtfs"
@@ -143,17 +144,34 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 
 // fetchDaily asks OASA for each line code of the line, with no lock held.
 func (a *App) fetchDaily(ctx context.Context, line, day string, now time.Time) dailyEntry {
+	// All codes at once under one deadline: each waits for its own scheduler slot.
+	codes := a.meta.LineCodes(line)
+	type answer struct {
+		d   telematics.DailySchedule
+		err error
+	}
+	answers := make([]answer, len(codes))
+	cctx, cancel := context.WithTimeout(ctx, dailyTimeout)
+	var wg sync.WaitGroup
+	for i, code := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d, err := a.daily(cctx, code)
+			answers[i] = answer{d, err}
+		}()
+	}
+	wg.Wait()
+	cancel()
 	var merged telematics.DailySchedule
 	partial := false
-	for _, code := range a.meta.LineCodes(line) {
-		cctx, cancel := context.WithTimeout(ctx, dailyTimeout)
-		d, err := a.daily(cctx, code)
-		cancel()
-		if err != nil {
-			a.log.Warn("daily schedule", "line_code", code, "err", err)
+	for i, r := range answers {
+		if r.err != nil {
+			a.log.Warn("daily schedule", "line_code", codes[i], "err", r.err)
 			partial = true
 			continue
 		}
+		d := r.d
 		if len(d.Go)+len(d.Come) == 0 {
 			partial = true // a variant with no runs today, or an answer that lost them: ask again later
 			continue

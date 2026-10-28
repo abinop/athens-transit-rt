@@ -150,6 +150,7 @@ type Scheduler struct {
 	lines      map[string]*lineState
 	pending    []*request
 	background []func(ctx context.Context) error
+	urgent     int // the first urgent entries of background are SubmitFirst work
 	stretch    [numTiers]float64
 	lastPlan   time.Time
 	sinceBG    int // line requests since the last background request
@@ -362,6 +363,15 @@ func (s *Scheduler) Submit(fn func(ctx context.Context) error) {
 	s.background = append(s.background, fn)
 }
 
+// SubmitFirst queues one background request that someone is waiting for (an API caller): it
+// goes before the queued background work, after the other waited-for requests.
+func (s *Scheduler) SubmitFirst(fn func(ctx context.Context) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.background = slices.Insert(s.background, s.urgent, fn)
+	s.urgent++
+}
+
 // pick returns the next request to send, or nil.
 func (s *Scheduler) pick() *request {
 	s.mu.Lock()
@@ -387,6 +397,9 @@ func (s *Scheduler) pick() *request {
 func (s *Scheduler) popBackground() *request {
 	fn := s.background[0]
 	s.background = s.background[1:]
+	if s.urgent > 0 {
+		s.urgent--
+	}
 	s.sinceBG = 0
 	s.sentBG++
 	return &request{bg: fn}

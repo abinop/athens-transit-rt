@@ -529,10 +529,12 @@ func (a *App) toolSuburban(ctx context.Context, in stationIn) *mcp.CallToolResul
 	if code != http.StatusOK {
 		return toolErr("upstream_unavailable")
 	}
-	return okJSON(struct {
-		Station    string          `json:"station"`
-		Departures json.RawMessage `json:"departures"`
-	}{pick.Name, body})
+	var dep rail.SuburbanDepartures
+	if json.Unmarshal(body, &dep) != nil {
+		return toolErr("upstream_unavailable")
+	}
+	dep.Station = pick.Name // the board answers with the station id
+	return okJSON(dep)
 }
 
 func (a *App) toolMetro(ctx context.Context, in stationIn) *mcp.CallToolResult {

@@ -116,9 +116,9 @@ func TestLineScheduleDailyPartialRetries(t *testing.T) {
 	now := monday1020
 	a := appWithLines(t, func() time.Time { return now }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R2", LineID: "L"}},
 		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}})
-	calls := 0
+	var calls atomic.Int32
 	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
-		calls++
+		calls.Add(1)
 		if code == "R2" {
 			return telematics.DailySchedule{}, errors.New("down")
 		}
@@ -127,17 +127,17 @@ func TestLineScheduleDailyPartialRetries(t *testing.T) {
 	_, body := get(t, a, "/v1/lines/L/schedule")
 	var sr ScheduleResponse
 	json.Unmarshal(body, &sr)
-	if sr.Source != "oasa-daily" || calls != 2 {
-		t.Fatalf("first %+v calls %d", sr, calls)
+	if sr.Source != "oasa-daily" || calls.Load() != 2 {
+		t.Fatalf("first %+v calls %d", sr, calls.Load())
 	}
 	get(t, a, "/v1/lines/L/schedule")
-	if calls != 2 {
-		t.Fatalf("asked again within the TTL: %d", calls)
+	if calls.Load() != 2 {
+		t.Fatalf("asked again within the TTL: %d", calls.Load())
 	}
 	now = now.Add(dailyNegativeTTL + time.Second)
 	get(t, a, "/v1/lines/L/schedule")
-	if calls != 4 {
-		t.Fatalf("partial result kept past the TTL: %d calls", calls)
+	if calls.Load() != 4 {
+		t.Fatalf("partial result kept past the TTL: %d calls", calls.Load())
 	}
 }
 
@@ -161,9 +161,9 @@ func TestLineScheduleDailyEmptyCodeRetries(t *testing.T) {
 	now := monday1020
 	a := appWithLines(t, func() time.Time { return now }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R2", LineID: "L"}},
 		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}})
-	calls := 0
+	var calls atomic.Int32
 	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
-		calls++
+		calls.Add(1)
 		if code == "R2" {
 			return telematics.DailySchedule{}, nil
 		}
@@ -172,8 +172,8 @@ func TestLineScheduleDailyEmptyCodeRetries(t *testing.T) {
 	get(t, a, "/v1/lines/L/schedule")
 	now = now.Add(dailyNegativeTTL + time.Second)
 	get(t, a, "/v1/lines/L/schedule")
-	if calls != 4 {
-		t.Fatalf("empty code not retried: %d calls", calls)
+	if calls.Load() != 4 {
+		t.Fatalf("empty code not retried: %d calls", calls.Load())
 	}
 }
 
@@ -182,8 +182,11 @@ func TestLineScheduleDailyCodeWithoutRoutes(t *testing.T) {
 	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R9", LineID: "L"}},
 		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}})
 	var asked []string
+	var mu sync.Mutex // the codes are asked in parallel
 	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
+		mu.Lock()
 		asked = append(asked, code)
+		mu.Unlock()
 		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
 	}
 	get(t, a, "/v1/lines/L/schedule")

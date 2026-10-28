@@ -703,7 +703,7 @@ func queued[T any](ctx context.Context, a *App, call func(ctx context.Context) (
 		return zero, errQueueFull
 	}
 	ch := make(chan answer, 1)
-	a.sched.Submit(func(sctx context.Context) error {
+	a.sched.SubmitFirst(func(sctx context.Context) error { // a caller waits: before the metadata work
 		defer a.queuedN.Add(-1)
 		if ctx.Err() != nil {
 			return nil // nobody waits for it any more
