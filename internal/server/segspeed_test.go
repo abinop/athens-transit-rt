@@ -123,7 +123,7 @@ func TestPathSpeedsFollowLiveTraffic(t *testing.T) {
 			t.Fatalf("path_speeds %s", body)
 		}
 		if last := v.PathSpeeds[len(v.PathSpeeds)-1]; last == nil || math.Abs(*last-5) > 0.05 {
-			t.Fatalf("past the traffic the usual speed: %v", *last)
+			t.Fatalf("past the traffic the usual speed: %v", deref(last))
 		}
 		return
 	}

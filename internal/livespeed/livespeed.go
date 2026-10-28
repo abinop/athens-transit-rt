@@ -38,7 +38,7 @@ type sample struct {
 	m, secs float64
 }
 
-// Grid is safe for concurrent use.
+// Grid is safe for concurrent use; a nil Grid knows no traffic (Blend, Prune, Cells).
 type Grid struct {
 	mu    sync.Mutex
 	cells map[key][]sample // in arrival order: vehicles are polled at different times
@@ -134,6 +134,9 @@ func (g *Grid) speedAt(k key, now int64) (float64, bool) {
 
 // Prune drops passes older than Window and the cells left empty.
 func (g *Grid) Prune(now int64) {
+	if g == nil {
+		return
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	old := now - int64(Window.Seconds())
@@ -154,6 +157,9 @@ func (g *Grid) Prune(now int64) {
 
 // Cells is the number of cells with passes.
 func (g *Grid) Cells() int {
+	if g == nil {
+		return 0
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return len(g.cells)
@@ -164,7 +170,7 @@ func (g *Grid) Cells() int {
 // rest of the usual speed, the road without at the usual speed (stepSpeed). typical is not
 // changed. nil when no step has a speed, as Steps.
 func (g *Grid) Blend(typical []*float64, line *geo.Polyline, s float64, now int64) []*float64 {
-	if line == nil || len(line.XY) < 2 {
+	if g == nil || line == nil || len(line.XY) < 2 {
 		return typical
 	}
 	length := line.Length()

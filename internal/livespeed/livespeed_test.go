@@ -135,3 +135,15 @@ func TestPruneOutOfOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestNilGridKnowsNoTraffic(t *testing.T) {
+	var g *Grid
+	five := 5.0
+	if got := g.Blend([]*float64{&five}, east, 0, 0); len(got) != 1 || got[0] != &five {
+		t.Fatalf("%v", got)
+	}
+	g.Prune(0)
+	if g.Cells() != 0 {
+		t.Fatal("cells in a nil grid")
+	}
+}
