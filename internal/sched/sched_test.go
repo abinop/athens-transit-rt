@@ -530,7 +530,7 @@ func TestSubmitFirstJumpsTheQueue(t *testing.T) {
 
 type reportSlots struct {
 	fakeSlots
-	got []time.Duration
+	got  []time.Duration
 	errs int
 }
 
