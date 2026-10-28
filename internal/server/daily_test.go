@@ -41,6 +41,11 @@ func TestDailyToSchedule(t *testing.T) {
 	if len(c.Directions) != 1 || c.Directions[0].Headsign != "ΚΥΚΛΙΚΗ" || c.Directions[0].Direction != 0 {
 		t.Fatalf("circular %+v", c)
 	}
+	// Two vehicles at one time (one ends its shift there, QA line Β9 11:45) are one departure.
+	dup := dailyToSchedule("Β9", "2026-10-28", telematics.DailySchedule{Descr: "Α - Β", Go: []string{"11:45", "11:45", "12:15"}, Come: []string{"08:45", "08:45"}})
+	if g, c := dup.Directions[0].Departures, dup.Directions[1].Departures; len(g) != 2 || len(c) != 1 {
+		t.Fatalf("duplicates kept: %+v", dup)
+	}
 }
 
 // Today the timetable comes from OASA's daily schedule of every line code of the line (merged,

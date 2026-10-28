@@ -195,9 +195,12 @@ func (a *App) fetchDaily(ctx context.Context, line, day string, now time.Time) d
 func dailyToSchedule(line, date string, d telematics.DailySchedule) ScheduleResponse {
 	resp := ScheduleResponse{Line: line, Date: date, Source: "oasa-daily", Directions: []ScheduleDirection{}}
 	deps := func(ts []string) []ScheduleDeparture {
-		out := make([]ScheduleDeparture, len(ts))
+		out := make([]ScheduleDeparture, 0, len(ts))
 		for i, t := range ts {
-			out[i] = ScheduleDeparture{T: t}
+			if i > 0 && t == ts[i-1] {
+				continue // two vehicles at one time (one ends its shift there): one departure
+			}
+			out = append(out, ScheduleDeparture{T: t})
 		}
 		return out
 	}
