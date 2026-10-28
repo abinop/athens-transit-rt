@@ -115,6 +115,7 @@ type App struct {
 	daily      func(ctx context.Context, lineCode string) (telematics.DailySchedule, error)
 	dailyMu    sync.Mutex // guards dailyCache only; never held during a request
 	dailyCache map[string]dailyEntry
+	dailyCalls map[string]*dailyCall // fetches in flight, by line
 }
 
 func New(cfg Config, log *slog.Logger) *App {
@@ -130,7 +131,16 @@ func New(cfg Config, log *slog.Logger) *App {
 				IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second})
 		}
 	}
-	a.daily = a.client.DailySchedule
+	// The daily schedule shares the telematics budget with the scheduler's polls.
+	a.daily = func(ctx context.Context, code string) (telematics.DailySchedule, error) {
+		if err := a.pacer.Wait(ctx); err != nil {
+			return telematics.DailySchedule{}, err
+		}
+		start := time.Now()
+		d, err := a.client.DailySchedule(ctx, code)
+		a.pacer.Report(time.Since(start), err)
+		return d, err
+	}
 	a.sched = sched.New(cfg.Sched, a.pacer, a.client, a.onLine)
 	a.meta = meta.Open(filepath.Join(cfg.StateDir, "telematics-meta.json"), a.client, a.sched.Submit,
 		func() { a.refreshLines() })

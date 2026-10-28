@@ -6,9 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,17 +112,8 @@ func TestLineScheduleDailyFallback(t *testing.T) {
 // negative TTL, not kept for the day.
 func TestLineScheduleDailyPartialRetries(t *testing.T) {
 	now := monday1020
-	dir := t.TempDir()
-	m := meta.Data{FetchedAt: now.Unix(), Lines: []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R2", LineID: "L"}},
-		Routes: map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}}}
-	b, _ := json.Marshal(m)
-	if err := os.WriteFile(filepath.Join(dir, "telematics-meta.json"), b, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a := New(Config{StateDir: dir, RPS: 4, Matcher: match.Memory, Sched: sched.DefaultConfig()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	a.now = func() time.Time { return now }
-	a.sched.SetClock(a.now)
-	a.SetFeed(gtfstest.StraightLine{Stops: 5, Trips: 6, First: 10 * 3600, Headway: 10, Leg: 5}.Feed(t), nil)
+	a := appWithLines(t, func() time.Time { return now }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R2", LineID: "L"}},
+		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}})
 	calls := 0
 	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
 		calls++
@@ -141,5 +136,119 @@ func TestLineScheduleDailyPartialRetries(t *testing.T) {
 	get(t, a, "/v1/lines/L/schedule")
 	if calls != 4 {
 		t.Fatalf("partial result kept past the TTL: %d calls", calls)
+	}
+}
+
+// appWithLines is newApp with its own telematics lines and routes.
+func appWithLines(t *testing.T, clock func() time.Time, lines []telematics.Line, routes map[string][]telematics.Route) *App {
+	t.Helper()
+	dir := t.TempDir()
+	b, _ := json.Marshal(meta.Data{FetchedAt: clock().Unix(), Lines: lines, Routes: routes})
+	if err := os.WriteFile(filepath.Join(dir, "telematics-meta.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := New(Config{StateDir: dir, RPS: 4, Matcher: match.Memory, Sched: sched.DefaultConfig()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.now = clock
+	a.sched.SetClock(a.now)
+	a.SetFeed(gtfstest.StraightLine{Stops: 5, Trips: 6, First: 10 * 3600, Headway: 10, Leg: 5}.Feed(t), nil)
+	return a
+}
+
+// A line code with an empty answer (no runs today, or OASA hiccup) is asked again later too.
+func TestLineScheduleDailyEmptyCodeRetries(t *testing.T) {
+	now := monday1020
+	a := appWithLines(t, func() time.Time { return now }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R2", LineID: "L"}},
+		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}})
+	calls := 0
+	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
+		calls++
+		if code == "R2" {
+			return telematics.DailySchedule{}, nil
+		}
+		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
+	}
+	get(t, a, "/v1/lines/L/schedule")
+	now = now.Add(dailyNegativeTTL + time.Second)
+	get(t, a, "/v1/lines/L/schedule")
+	if calls != 4 {
+		t.Fatalf("empty code not retried: %d calls", calls)
+	}
+}
+
+// A line code the metadata knows without routes yet still counts.
+func TestLineScheduleDailyCodeWithoutRoutes(t *testing.T) {
+	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R9", LineID: "L"}},
+		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}})
+	var asked []string
+	var mu sync.Mutex
+	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
+		mu.Lock()
+		asked = append(asked, code)
+		mu.Unlock()
+		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
+	}
+	get(t, a, "/v1/lines/L/schedule")
+	sort.Strings(asked)
+	if !reflect.DeepEqual(asked, []string{"R1", "R9"}) {
+		t.Fatalf("asked %v", asked)
+	}
+}
+
+// Requests that miss the cache at the same time share one fetch per line code.
+func TestLineScheduleDailyConcurrentMisses(t *testing.T) {
+	a := newApp(t, monday1020)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	a.daily = func(_ context.Context, code string) (telematics.DailySchedule, error) {
+		calls.Add(1)
+		<-release
+		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
+	}
+	var wg sync.WaitGroup
+	sources := make([]string, 5)
+	for i := range sources {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			a.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/lines/L/schedule", nil))
+			var sr ScheduleResponse
+			json.Unmarshal(rec.Body.Bytes(), &sr)
+			sources[i] = sr.Source
+		}()
+	}
+	time.Sleep(50 * time.Millisecond) // let them all miss
+	close(release)
+	wg.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("%d fetches for 5 concurrent requests", calls.Load())
+	}
+	for i, s := range sources {
+		if s != "oasa-daily" {
+			t.Errorf("request %d: source %q", i, s)
+		}
+	}
+}
+
+// A client that leaves does not cut the fetch short: the full timetable is cached for the others.
+func TestLineScheduleDailyClientCancel(t *testing.T) {
+	a := newApp(t, monday1020)
+	calls := 0
+	a.daily = func(ctx context.Context, code string) (telematics.DailySchedule, error) {
+		calls++
+		if err := ctx.Err(); err != nil {
+			return telematics.DailySchedule{}, err
+		}
+		return telematics.DailySchedule{Descr: "A - B", Go: []string{"09:00"}}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/lines/L/schedule", nil).WithContext(ctx))
+	_, body := get(t, a, "/v1/lines/L/schedule")
+	var sr ScheduleResponse
+	json.Unmarshal(body, &sr)
+	if sr.Source != "oasa-daily" || calls != 1 {
+		t.Fatalf("after a cancelled client: %+v, %d calls", sr, calls)
 	}
 }

@@ -82,7 +82,7 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 // dailyEntry is the cached daily schedule of a line: a full success lasts for its Athens day; a
-// failure (ok false), or a result with a line code missing (partial), until retry.
+// failure (ok false), or a result with a line code failed or empty (partial), until retry.
 type dailyEntry struct {
 	day     string
 	d       telematics.DailySchedule
@@ -91,34 +91,68 @@ type dailyEntry struct {
 	retry   time.Time
 }
 
+// dailyCall is a fetch in flight: requests that miss the cache meanwhile wait for it.
+type dailyCall struct {
+	done chan struct{}
+	e    dailyEntry
+}
+
 // dailyOfLine returns OASA's schedule of today for a line: the runs of all its line codes
 // merged. ok is false when there is none (OASA down, empty, no line code): use the GTFS then.
 func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (telematics.DailySchedule, bool) {
 	day := today.Format(time.DateOnly)
 	now := a.now()
 	a.dailyMu.Lock()
-	e, cached := a.dailyCache[line]
-	a.dailyMu.Unlock()
-	if cached && e.day == day && ((e.ok && !e.partial) || now.Before(e.retry)) {
+	if e, cached := a.dailyCache[line]; cached && e.day == day && ((e.ok && !e.partial) || now.Before(e.retry)) {
+		a.dailyMu.Unlock()
 		return e.d, e.ok
 	}
-	var codes []string
-	seen := map[string]bool{}
-	for _, ref := range a.meta.LineRoutes()[line] {
-		if ref.LineCode != "" && !seen[ref.LineCode] {
-			seen[ref.LineCode] = true
-			codes = append(codes, ref.LineCode)
+	if c, busy := a.dailyCalls[line]; busy {
+		a.dailyMu.Unlock()
+		select {
+		case <-c.done:
+			return c.e.d, c.e.ok
+		case <-ctx.Done():
+			return telematics.DailySchedule{}, false
 		}
 	}
+	c := &dailyCall{done: make(chan struct{})}
+	if a.dailyCalls == nil {
+		a.dailyCalls = map[string]*dailyCall{}
+	}
+	a.dailyCalls[line] = c
+	a.dailyMu.Unlock()
+
+	// The fetch outlives the request that started it: the others wait for it, and the cache
+	// must not keep a timetable cut short by one client leaving.
+	c.e = a.fetchDaily(context.WithoutCancel(ctx), line, day, now)
+
+	a.dailyMu.Lock()
+	if a.dailyCache == nil {
+		a.dailyCache = map[string]dailyEntry{}
+	}
+	a.dailyCache[line] = c.e
+	delete(a.dailyCalls, line)
+	a.dailyMu.Unlock()
+	close(c.done)
+	return c.e.d, c.e.ok
+}
+
+// fetchDaily asks OASA for each line code of the line, with no lock held.
+func (a *App) fetchDaily(ctx context.Context, line, day string, now time.Time) dailyEntry {
 	var merged telematics.DailySchedule
 	partial := false
-	for _, code := range codes {
+	for _, code := range a.meta.LineCodes(line) {
 		cctx, cancel := context.WithTimeout(ctx, dailyTimeout)
 		d, err := a.daily(cctx, code)
 		cancel()
 		if err != nil {
 			a.log.Warn("daily schedule", "line_code", code, "err", err)
 			partial = true
+			continue
+		}
+		if len(d.Go)+len(d.Come) == 0 {
+			partial = true // a variant with no runs today, or an answer that lost them: ask again later
 			continue
 		}
 		if merged.Descr == "" {
@@ -131,17 +165,7 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 	sort.Strings(merged.Go)
 	sort.Strings(merged.Come)
 	ok := len(merged.Go)+len(merged.Come) > 0
-	if !ok && ctx.Err() != nil {
-		return telematics.DailySchedule{}, false // the client left: not OASA's fault, do not cache
-	}
-	e = dailyEntry{day: day, d: merged, ok: ok, partial: partial, retry: now.Add(dailyNegativeTTL)}
-	a.dailyMu.Lock()
-	if a.dailyCache == nil {
-		a.dailyCache = map[string]dailyEntry{}
-	}
-	a.dailyCache[line] = e
-	a.dailyMu.Unlock()
-	return merged, ok
+	return dailyEntry{day: day, d: merged, ok: ok, partial: partial, retry: now.Add(dailyNegativeTTL)}
 }
 
 // dailyToSchedule shapes OASA's daily schedule like the GTFS timetable: the Go runs are

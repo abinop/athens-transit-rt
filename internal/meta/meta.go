@@ -102,6 +102,22 @@ func (s *Store) LineRoutes() LineRoutes {
 	return out
 }
 
+// LineCodes returns the telematics line codes of a line number, in metadata order, with or
+// without known routes.
+func (s *Store) LineCodes(lineID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range s.data.Lines {
+		if l.LineID == lineID && l.LineCode != "" && !seen[l.LineCode] {
+			seen[l.LineCode] = true
+			out = append(out, l.LineCode)
+		}
+	}
+	return out
+}
+
 // LineIDs returns every telematics line number.
 func (s *Store) LineIDs() []string {
 	s.mu.Lock()
