@@ -46,6 +46,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/lines/{id}", a.handleLine)
 	mux.HandleFunc("GET /v1/lines/{id}/schedule", a.handleSchedule)
 	mux.HandleFunc("GET /v1/status", a.handleStatus)
+	mux.HandleFunc("GET /v1/stops/{id}", a.handleStop)
 	mux.HandleFunc("GET /v1/vehicles", a.handleVehicles)
 	mux.HandleFunc("GET /v1/vehicles/tiles/{z}/{x}/{y}", a.handleTile)
 	mux.HandleFunc("GET /v1/gtfs-rt/{name}", a.handleGTFSRT)
