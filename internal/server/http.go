@@ -120,6 +120,9 @@ type gzipWriter struct {
 
 func (g *gzipWriter) Write(b []byte) (int, error) { return g.zw.Write(b) }
 
+// Unwrap lets http.ResponseController reach the connection (read deadlines, flushing).
+func (g *gzipWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
 func writeJSON(w http.ResponseWriter, status, maxAge int, v any) {
 	b, err := json.Marshal(v)
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/angelospk/athens-transit-rt/internal/stats"
 	"github.com/angelospk/athens-transit-rt/internal/telematics"
 )
 
@@ -326,4 +327,67 @@ func TestMCPKeepAliveAfterDeadline(t *testing.T) {
 	call()
 	time.Sleep(400 * time.Millisecond)
 	call()
+}
+
+// The stalled-body guard also holds for clients that accept gzip (the API's gzip writer).
+func TestMCPStalledBodyGzip(t *testing.T) {
+	old := mcpBodyTimeout
+	mcpBodyTimeout = 200 * time.Millisecond
+	defer func() { mcpBodyTimeout = old }()
+	srv := httptest.NewServer(newApp(t, monday1020).Handler())
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST /mcp HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: 1000\r\n\r\n{\"jsonrpc\":")
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	start := time.Now()
+	if status, err := bufio.NewReader(conn).ReadString('\n'); err != nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("stalled gzip body: %q %v after %v", status, err, time.Since(start))
+	}
+}
+
+// The first caller leaving does not fail the others waiting for the same stop.
+func TestMCPStopArrivalsLeaderLeaves(t *testing.T) {
+	a := newApp(t, monday1020)
+	started, release := make(chan struct{}), make(chan struct{})
+	a.stopArrivals = func(ctx context.Context, _ string) ([]telematics.Arrival, error) {
+		close(started)
+		select {
+		case <-release:
+			return []telematics.Arrival{{RouteCode: "SH", Minutes: 2}}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	leader, leave := context.WithCancel(context.Background())
+	go a.arrivals(leader, "S2")
+	<-started
+	got := make(chan error, 1)
+	go func() {
+		_, err := a.arrivals(context.Background(), "S2")
+		got <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	leave()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	if err := <-got; err != nil {
+		t.Fatalf("waiter failed with the leader: %v", err)
+	}
+}
+
+// With a valid timetable a line that ran none of its trips is the worst, not skipped; with an
+// expired one it may not exist any more and is left out.
+func TestSummarizeDayMissedAll(t *testing.T) {
+	d := stats.Day{Trips: &stats.Trips{ByLine: []stats.TripLine{{Line: "Z", TripCount: stats.TripCount{Planned: 20, Missed: 20}}}}}
+	if s := summarizeDay(d); len(s.MostMissed) != 1 || s.MostMissed[0].Line != "Z" {
+		t.Fatalf("valid timetable: %+v", s.MostMissed)
+	}
+	d.Trips.GTFSExpired = true
+	if s := summarizeDay(d); len(s.MostMissed) != 0 {
+		t.Fatalf("expired timetable: %+v", s.MostMissed)
+	}
 }

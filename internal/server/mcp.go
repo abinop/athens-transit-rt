@@ -25,9 +25,10 @@ const (
 	mcpInstructions = "Athens OASA buses and trolleys live (positions refresh every 30-60 s), today's timetables, " +
 		"OASA's own stop predictions, daily network statistics, suburban rail (live) and metro/tram " +
 		"(STASY timetable). Names are Greek; all times are Europe/Athens."
-	stopArrivalsTTL  = 30 * time.Second
-	slowestMinTimeS  = 15 * 3600 // a line needs this much measured time to enter the slowest list
-	mostMissedMinTrp = 20        // measured trips a line needs to enter the most-missed list
+	stopArrivalsTTL     = 30 * time.Second
+	stopArrivalsTimeout = 20 * time.Second // the longest a shared OASA call waits in the queue
+	slowestMinTimeS     = 15 * 3600        // a line needs this much measured time to enter the slowest list
+	mostMissedMinTrp    = 20               // measured trips a line needs to enter the most-missed list
 )
 
 type arrivalsEntry struct {
@@ -360,7 +361,11 @@ func (a *App) arrivals(ctx context.Context, id string) ([]telematics.Arrival, er
 	a.arrCalls[id] = c
 	a.arrMu.Unlock()
 
-	c.list, c.err = a.stopArrivals(ctx, id)
+	// The call outlives the request that started it: the others waiting must not fail because
+	// that one client left.
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopArrivalsTimeout)
+	c.list, c.err = a.stopArrivals(fctx, id)
+	cancel()
 
 	a.arrMu.Lock()
 	if c.err == nil {
@@ -430,7 +435,6 @@ type daySummary struct {
 	} `json:"trips,omitempty"`
 	Slowest     []kmhRow    `json:"slowest"`
 	MostMissed  []missedRow `json:"most_missed"`
-	UnseenLines int         `json:"unseen_lines"` // planned lines with no trip seen: not ranked (may not run any more)
 	GTFSExpired bool        `json:"gtfs_expired,omitempty"`
 }
 
@@ -465,10 +469,8 @@ func summarizeDay(d stats.Day) daySummary {
 		s.GTFSExpired = t.GTFSExpired
 		for _, l := range t.ByLine {
 			measured := l.Planned - l.Unmeasured
-			if l.Run+l.Partial == 0 {
-				if measured > 0 {
-					s.UnseenLines++
-				}
+			// With an expired timetable a line never seen may not run any more: not ranked then.
+			if t.GTFSExpired && l.Run+l.Partial == 0 {
 				continue
 			}
 			if measured >= mostMissedMinTrp {
