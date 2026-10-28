@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/angelospk/athens-transit-rt/internal/geo"
+	"github.com/angelospk/athens-transit-rt/internal/livespeed"
 )
 
 var t0 = time.Unix(1_790_000_000, 0)
@@ -37,7 +38,7 @@ func deref(p *float64) any {
 }
 
 func TestSpeedSteady(t *testing.T) {
-	m := newMotion()
+	m := newMotion(nil)
 	l := straight()
 	if sp := feedFixes(m, l, [2]float64{100, 0}); sp != nil {
 		t.Fatalf("one fix gave speed %v", *sp)
@@ -47,49 +48,49 @@ func TestSpeedSteady(t *testing.T) {
 }
 
 func TestSpeedIgnoresOneOutlier(t *testing.T) {
-	m := newMotion()
+	m := newMotion(nil)
 	// 8 m/s with one GPS fix 150 m ahead in the middle and one at the end.
 	speedIs(t, feedFixes(m, straight(), [2]float64{0, 0}, [2]float64{240, 30}, [2]float64{630, 60},
 		[2]float64{720, 90}, [2]float64{960, 120}), 8)
-	m = newMotion()
+	m = newMotion(nil)
 	speedIs(t, feedFixes(m, straight(), [2]float64{0, 0}, [2]float64{240, 30}, [2]float64{480, 60},
 		[2]float64{720, 90}, [2]float64{1100, 120}), 8)
 }
 
 func TestSpeedStandingAndClamp(t *testing.T) {
-	m := newMotion()
+	m := newMotion(nil)
 	speedIs(t, feedFixes(m, straight(), [2]float64{500, 0}, [2]float64{512, 30}, [2]float64{495, 60}), 0)
-	m = newMotion()
+	m = newMotion(nil)
 	// 23 m/s is plausible enough to keep (< 20 m/s * dt + 100 m) but is clamped.
 	speedIs(t, feedFixes(m, straight(), [2]float64{0, 0}, [2]float64{690, 30}), 20)
 }
 
 func TestSpeedNeedsTimeSpan(t *testing.T) {
-	m := newMotion()
+	m := newMotion(nil)
 	if sp := feedFixes(m, straight(), [2]float64{0, 0}, [2]float64{100, 5}); sp != nil {
 		t.Fatalf("5 s span gave speed %v", *sp)
 	}
 	// Fixes older than the window do not count.
-	m = newMotion()
+	m = newMotion(nil)
 	if sp := feedFixes(m, straight(), [2]float64{0, 0}, [2]float64{3000, 400}); sp != nil {
 		t.Fatalf("400 s gap gave speed %v", *sp)
 	}
 }
 
 func TestResetOnNewLineAndJumps(t *testing.T) {
-	m := newMotion()
+	m := newMotion(nil)
 	l := straight()
 	feedFixes(m, l, [2]float64{1000, 0}, [2]float64{1300, 30})
 	if sp := feedFixes(m, straight(), [2]float64{1600, 60}); sp != nil {
 		t.Fatal("new line kept history")
 	}
-	m = newMotion()
+	m = newMotion(nil)
 	feedFixes(m, l, [2]float64{1000, 0}, [2]float64{1300, 30})
 	if sp := feedFixes(m, l, [2]float64{200, 60}); sp != nil {
 		t.Fatal("backward jump (new run) kept history")
 	}
 	speedIs(t, feedFixes(m, l, [2]float64{500, 90}), 10) // recovers from the new start
-	m = newMotion()
+	m = newMotion(nil)
 	feedFixes(m, l, [2]float64{1000, 0}, [2]float64{1300, 30})
 	if sp := feedFixes(m, l, [2]float64{3000, 60}); sp != nil { // 1700 m in 30 s: another pass
 		t.Fatal("forward jump kept history")
@@ -97,7 +98,7 @@ func TestResetOnNewLineAndJumps(t *testing.T) {
 }
 
 func TestStaleFixIgnored(t *testing.T) {
-	m := newMotion()
+	m := newMotion(nil)
 	l := straight()
 	feedFixes(m, l, [2]float64{1000, 0}, [2]float64{1300, 30})
 	// An older fix (e.g. from another line's slower poll) neither resets nor gets a speed.
@@ -110,7 +111,7 @@ func TestStaleFixIgnored(t *testing.T) {
 }
 
 func TestForgetBoundsMemory(t *testing.T) {
-	m := newMotion()
+	m := newMotion(nil)
 	m.observe("a", straight(), 0, t0)
 	m.observe("b", straight(), 0, t0.Add(9*time.Minute))
 	m.forget(t0.Add(11 * time.Minute))
@@ -131,7 +132,7 @@ func TestForgetBoundsMemory(t *testing.T) {
 func TestPickPass(t *testing.T) {
 	// Out and back on one street: every point has two passes, 2000 m apart.
 	l := geo.NewPolyline([][2]float64{{0, 0}, {1000, 0}, {1000, 1}, {0, 1}})
-	m := newMotion()
+	m := newMotion(nil)
 	cands := l.Candidates(300, 0, 150, 0, false)
 	if len(cands) != 2 {
 		t.Fatalf("cands %v", cands)
@@ -269,5 +270,24 @@ func TestSimplifiedOffsets(t *testing.T) {
 	}
 	if math.Abs(off(fine.Length())-sent) > 0.5 {
 		t.Fatalf("end offset %v, points sent %v m", off(fine.Length()), sent)
+	}
+}
+
+// A bus waiting at its terminus is not traffic: minutes standing there would make the road look
+// jammed to every line that passes (R3).
+func TestWaitingIsNotTraffic(t *testing.T) {
+	roads := livespeed.New()
+	m := newMotion(roads)
+	l := straight()
+	for _, id := range []string{"a", "b"} {
+		m.observeAs(id, l, 100, t0, false)
+		m.observeAs(id, l, 100, t0.Add(60*time.Second), false)
+	}
+	if roads.Cells() != 0 {
+		t.Fatalf("waiting buses made %d road cells", roads.Cells())
+	}
+	m.observeAs("a", l, 400, t0.Add(90*time.Second), true)
+	if roads.Cells() == 0 {
+		t.Fatal("a bus on its way is traffic")
 	}
 }

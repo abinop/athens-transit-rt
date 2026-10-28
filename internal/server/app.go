@@ -23,6 +23,7 @@ import (
 	"github.com/angelospk/athens-transit-rt/internal/geo"
 	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 	"github.com/angelospk/athens-transit-rt/internal/history"
+	"github.com/angelospk/athens-transit-rt/internal/livespeed"
 	"github.com/angelospk/athens-transit-rt/internal/match"
 	"github.com/angelospk/athens-transit-rt/internal/meta"
 	"github.com/angelospk/athens-transit-rt/internal/rail"
@@ -85,6 +86,7 @@ type App struct {
 
 	matchMu sync.Mutex // serialises matching (matchers are not concurrency-safe) and motion
 	motion  *motion
+	roads   *livespeed.Grid // recent speeds per road piece, from every line
 
 	mu           sync.RWMutex
 	w            *world
@@ -135,7 +137,8 @@ type App struct {
 
 func New(cfg Config, log *slog.Logger) *App {
 	a := &App{cfg: cfg, log: log, now: time.Now, lines: map[string]*lineData{}, known: map[string]bool{},
-		motion: newMotion()}
+		roads: livespeed.New()}
+	a.motion = newMotion(a.roads)
 	a.pacer = telematics.NewPacer(cfg.RPS)
 	a.client = telematics.New(cfg.TelematicsURL, nil) // the scheduler paces every request
 	a.client.MinGap = a.pacer.BaseInterval()
@@ -178,7 +181,7 @@ func (a *App) SetFeed(f *gtfs.Feed, m *release.Manifest) {
 	a.mu.Lock()
 	a.w = w
 	a.mu.Unlock()
-	a.motion = newMotion() // positions along the old feed's shapes mean nothing now
+	a.motion = newMotion(a.roads) // positions along the old feed's shapes mean nothing now
 	// Trip ids of the old feed mean nothing either. Cleared before matchMu opens, so a poll that
 	// starts right after cannot record its matches into a map that is dropped a moment later.
 	a.forgetSeen()
@@ -392,10 +395,13 @@ func (a *App) motionOf(w *world, r *match.Result, shape int32) (speed *float64, 
 			if r.Waiting {
 				stops = g.StopAlong[:1]
 			}
-			speed = a.motion.observe(r.VehicleID, g.Line, r.Along, r.Time)
+			speed = a.motion.observeAs(r.VehicleID, g.Line, r.Along, r.Time, !r.Waiting)
 			path, beyond, at = pathAhead(g.Line, r.Along, speed, stops)
 			if tab := a.segs.Load(); shape >= 0 && !r.Waiting && tab.Feed() == worldVersion(w) {
 				steps = tab.Steps(w.feed.Shapes[shape].ID, r.Along, g.Line.Length(), segspeed.Slot(r.Time, gtfs.Athens), stepFallback(speed))
+			}
+			if !r.Waiting {
+				steps = a.roads.Blend(steps, g.Line, r.Along, r.Time.Unix()) // today's traffic, any line
 			}
 			return speed, path, beyond, at, steps
 		}
@@ -628,6 +634,7 @@ func (a *App) housekeeping(ctx context.Context) {
 			}
 			a.warnExpiry(false)
 			a.forget()
+			a.roads.Prune(a.now().Unix())
 			a.logStats()
 		case <-release.C:
 			if a.cfg.GTFSZip != "" {
@@ -665,7 +672,7 @@ func (a *App) logStats() {
 	a.log.Info("stats", "requests", reqs, "requests_last_min", reqs-a.lastRequests, "errors", a.client.Errors(),
 		"watched", st.LinesByTier[sched.Watched], "dense", st.LinesByTier[sched.Dense], "other", st.LinesByTier[sched.Other],
 		"stretch_other", fmt.Sprintf("%.2f", st.Stretch[sched.Other]), "rps_now", fmt.Sprintf("%.2f", a.pacer.RPS()),
-		"vehicles", vehicles, "matched", matched)
+		"vehicles", vehicles, "matched", matched, "road_cells", a.roads.Cells())
 	a.lastRequests = reqs
 }
 

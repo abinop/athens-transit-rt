@@ -34,7 +34,7 @@ func benchApp(b *testing.B, n int) *App {
 	}
 	now := monday1020
 	a := &App{log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time { return now },
-		lines: map[string]*lineData{}, motion: newMotion()}
+		lines: map[string]*lineData{}, motion: newMotion(nil)}
 	m := match.New(f, nil, match.Hungarian)
 	a.w = &world{feed: f, matcher: m}
 	rng := rand.New(rand.NewPCG(1, 2))
@@ -117,7 +117,7 @@ func prodApp(b *testing.B) (*App, time.Time) {
 	f := gtfstest.StraightLine{Stops: 2, Trips: 1, First: 10 * 3600, Headway: 10, Leg: 2}.Feed(b)
 	now := time.Unix(r.UpdatedAt, 0)
 	a := &App{log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time { return now },
-		lines: map[string]*lineData{}, motion: newMotion(), w: &world{feed: f}}
+		lines: map[string]*lineData{}, motion: newMotion(nil), w: &world{feed: f}}
 	for _, c := range r.Vehicles {
 		d := a.lines[c.Line]
 		if d == nil {

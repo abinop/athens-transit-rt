@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/angelospk/athens-transit-rt/internal/geo"
+	"github.com/angelospk/athens-transit-rt/internal/livespeed"
 )
 
 // Motion: a few recent fixes per vehicle as distance along its line, for the `speed` and `path`
@@ -42,9 +43,12 @@ type motionTrack struct {
 
 type motion struct {
 	tracks map[string]*motionTrack
+	roads  *livespeed.Grid // every plausible move is today's traffic on its road
 }
 
-func newMotion() *motion { return &motion{tracks: map[string]*motionTrack{}} }
+func newMotion(roads *livespeed.Grid) *motion {
+	return &motion{tracks: map[string]*motionTrack{}, roads: roads}
+}
 
 // plausible reports whether a vehicle can be at s at time t after fix f on the same line.
 func plausible(f motionFix, s float64, t int64) bool {
@@ -55,6 +59,12 @@ func plausible(f motionFix, s float64, t int64) bool {
 // observe records a fix and returns the vehicle's speed (nil when unknown). A fix older than
 // the track's newest one changes nothing and gets no speed.
 func (m *motion) observe(id string, line *geo.Polyline, s float64, at time.Time) *float64 {
+	return m.observeAs(id, line, s, at, true)
+}
+
+// observeAs is observe; traffic false keeps the move out of the road speeds (a bus waiting at
+// its terminus is not traffic).
+func (m *motion) observeAs(id string, line *geo.Polyline, s float64, at time.Time, traffic bool) *float64 {
 	t := at.Unix()
 	tr := m.tracks[id]
 	if tr != nil && len(tr.fixes) > 0 {
@@ -70,6 +80,9 @@ func (m *motion) observe(id string, line *geo.Polyline, s float64, at time.Time)
 		// New shape, new run or another pass of a loop: start over.
 		tr = &motionTrack{line: line, fixes: make([]motionFix, 0, motionFixes)}
 		m.tracks[id] = tr
+	}
+	if n := len(tr.fixes); n > 0 && m.roads != nil && traffic {
+		m.roads.Pass(id, line, tr.fixes[n-1].s, s, tr.fixes[n-1].t, t)
 	}
 	if len(tr.fixes) == motionFixes {
 		tr.fixes = append(tr.fixes[:0], tr.fixes[1:]...)
