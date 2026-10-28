@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +35,16 @@ type arrivalsEntry struct {
 	list []telematics.Arrival
 }
 
+// arrivalsCall is an OASA call in flight for a stop: requests for the same stop wait for it.
+type arrivalsCall struct {
+	done chan struct{}
+	list []telematics.Arrival
+	err  error
+}
+
+// mcpBodyTimeout bounds how long a client may take to send its request body.
+var mcpBodyTimeout = 15 * time.Second
+
 // MCPServer is the read-only Model Context Protocol server (tools over the app's own API).
 func (a *App) MCPServer() *mcp.Server {
 	a.mcpOnce.Do(func() {
@@ -60,14 +72,41 @@ func (a *App) MCPServer() *mcp.Server {
 }
 
 func (a *App) mcpHandler() http.Handler {
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return a.MCPServer() },
-		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return a.MCPServer() },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true,
+			// The server sits behind a reverse proxy on 127.0.0.1, so every request arrives on
+			// loopback with the public Host. The DNS rebinding guard would refuse them all; it
+			// protects private local servers, and this one serves public read-only data.
+			DisableLocalhostProtection: true})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		if rc.SetReadDeadline(time.Now().Add(mcpBodyTimeout)) == nil { // unsupported in tests with a recorder
+			r.Body = &bodyDeadline{ReadCloser: r.Body, rc: rc}
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// bodyDeadline lifts the read deadline once the body is read to its end, so the connection's
+// later reads (the next request, the close watch) are not cut. A body that never arrives keeps
+// the deadline: the read fails and the server closes the connection.
+type bodyDeadline struct {
+	io.ReadCloser
+	rc *http.ResponseController
+}
+
+func (b *bodyDeadline) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		_ = b.rc.SetReadDeadline(time.Time{})
+	}
+	return n, err
 }
 
 // addTool registers a tool whose handler returns the tool result; Go errors are never used for
 // problems the caller can fix.
 func addTool[In any](s *mcp.Server, name, desc string, fn func(ctx context.Context, in In) *mcp.CallToolResult) {
-	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc},
+	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc, Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 			return fn(ctx, in), nil, nil
 		})
@@ -272,18 +311,12 @@ func (a *App) toolStopArrivals(ctx context.Context, in stopIn) *mcp.CallToolResu
 	if w.feed.StopIndex(id) < 0 {
 		return toolErr("unknown_stop: %s", id)
 	}
-	list, ok := a.cachedArrivals(id)
-	if !ok {
-		var err error
-		if list, err = a.stopArrivals(ctx, id); err != nil {
-			return toolErr("upstream_unavailable")
-		}
-		a.arrMu.Lock()
-		if a.arrCache == nil {
-			a.arrCache = map[string]arrivalsEntry{}
-		}
-		a.arrCache[id] = arrivalsEntry{a.now(), list}
-		a.arrMu.Unlock()
+	list, err := a.arrivals(ctx, id)
+	if errors.Is(err, errQueueFull) {
+		return toolErr("busy: try again in a minute")
+	}
+	if err != nil {
+		return toolErr("upstream_unavailable")
 	}
 	lineOf := map[string]string{}
 	for line, refs := range a.meta.LineRoutes() {
@@ -303,14 +336,43 @@ func (a *App) toolStopArrivals(ctx context.Context, in stopIn) *mcp.CallToolResu
 	return okJSON(out)
 }
 
-func (a *App) cachedArrivals(id string) ([]telematics.Arrival, bool) {
+// arrivals returns OASA's predictions for a stop: cached for stopArrivalsTTL, one call per stop at
+// a time (the others wait for it). Errors are not cached.
+func (a *App) arrivals(ctx context.Context, id string) ([]telematics.Arrival, error) {
 	a.arrMu.Lock()
-	defer a.arrMu.Unlock()
-	e, ok := a.arrCache[id]
-	if !ok || a.now().Sub(e.at) >= stopArrivalsTTL {
-		return nil, false
+	if e, ok := a.arrCache[id]; ok && a.now().Sub(e.at) < stopArrivalsTTL {
+		a.arrMu.Unlock()
+		return e.list, nil
 	}
-	return e.list, true
+	if c, busy := a.arrCalls[id]; busy {
+		a.arrMu.Unlock()
+		select {
+		case <-c.done:
+			return c.list, c.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	c := &arrivalsCall{done: make(chan struct{})}
+	if a.arrCalls == nil {
+		a.arrCalls = map[string]*arrivalsCall{}
+	}
+	a.arrCalls[id] = c
+	a.arrMu.Unlock()
+
+	c.list, c.err = a.stopArrivals(ctx, id)
+
+	a.arrMu.Lock()
+	if c.err == nil {
+		if a.arrCache == nil {
+			a.arrCache = map[string]arrivalsEntry{}
+		}
+		a.arrCache[id] = arrivalsEntry{a.now(), c.list}
+	}
+	delete(a.arrCalls, id)
+	a.arrMu.Unlock()
+	close(c.done)
+	return c.list, c.err
 }
 
 // stopArrivalsQueued asks OASA for a stop's predictions as a background request of the scheduler.
@@ -368,6 +430,7 @@ type daySummary struct {
 	} `json:"trips,omitempty"`
 	Slowest     []kmhRow    `json:"slowest"`
 	MostMissed  []missedRow `json:"most_missed"`
+	UnseenLines int         `json:"unseen_lines"` // planned lines with no trip seen: not ranked (may not run any more)
 	GTFSExpired bool        `json:"gtfs_expired,omitempty"`
 }
 
@@ -402,7 +465,13 @@ func summarizeDay(d stats.Day) daySummary {
 		s.GTFSExpired = t.GTFSExpired
 		for _, l := range t.ByLine {
 			measured := l.Planned - l.Unmeasured
-			if l.Run+l.Partial > 0 && measured >= mostMissedMinTrp {
+			if l.Run+l.Partial == 0 {
+				if measured > 0 {
+					s.UnseenLines++
+				}
+				continue
+			}
+			if measured >= mostMissedMinTrp {
 				s.MostMissed = append(s.MostMissed, missedRow{l.Line, l.Missed, measured})
 			}
 		}

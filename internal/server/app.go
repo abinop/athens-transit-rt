@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -119,8 +120,11 @@ type App struct {
 	dailyCalls map[string]*dailyCall // fetches in flight, by line
 
 	stopArrivals func(ctx context.Context, stopCode string) ([]telematics.Arrival, error)
-	arrMu        sync.Mutex // guards arrCache only; never held during a request
+	arrMu        sync.Mutex // guards arrCache and arrCalls only; never held during a request
 	arrCache     map[string]arrivalsEntry
+	arrCalls     map[string]*arrivalsCall // OASA calls in flight, by stop
+
+	queuedN atomic.Int32 // OASA calls queued by requests and not yet run or dropped
 
 	mcpOnce    sync.Once
 	mcpSrv     *mcp.Server
@@ -680,16 +684,30 @@ func (a *App) forget() {
 	a.mu.Unlock()
 }
 
+// maxQueued bounds the OASA calls that requests may have waiting in the scheduler at once.
+const maxQueued = 16
+
+var errQueueFull = errors.New("telematics: request queue full")
+
 // queued runs one OASA call as a background request of the scheduler: it takes a request slot
-// (budget, backoff, MaxInFlight) like the polls. A caller that gives up leaves it queued; the
-// buffered channel lets it finish without anyone reading.
+// (budget, backoff, MaxInFlight) like the polls. At most maxQueued wait at once; past that the
+// caller is told at once. A call whose caller has left by its turn is dropped, not sent.
 func queued[T any](ctx context.Context, a *App, call func(ctx context.Context) (T, error)) (T, error) {
 	type answer struct {
 		v   T
 		err error
 	}
+	var zero T
+	if a.queuedN.Add(1) > maxQueued {
+		a.queuedN.Add(-1)
+		return zero, errQueueFull
+	}
 	ch := make(chan answer, 1)
 	a.sched.Submit(func(sctx context.Context) error {
+		defer a.queuedN.Add(-1)
+		if ctx.Err() != nil {
+			return nil // nobody waits for it any more
+		}
 		v, err := call(sctx)
 		ch <- answer{v, err}
 		return err
@@ -698,7 +716,6 @@ func queued[T any](ctx context.Context, a *App, call func(ctx context.Context) (
 	case r := <-ch:
 		return r.v, r.err
 	case <-ctx.Done():
-		var zero T
 		return zero, ctx.Err()
 	}
 }

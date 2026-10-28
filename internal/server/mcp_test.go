@@ -1,12 +1,21 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -168,4 +177,153 @@ func TestMCPHTTPToolCall(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `\"source\":\"gtfs\"`) {
 		t.Fatalf("tools/call %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+// Callers asking the same stop at once share one OASA call.
+func TestMCPStopArrivalsConcurrent(t *testing.T) {
+	a := newApp(t, monday1020)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	a.stopArrivals = func(context.Context, string) ([]telematics.Arrival, error) {
+		calls.Add(1)
+		<-release
+		return []telematics.Arrival{{RouteCode: "SH", Minutes: 3}}, nil
+	}
+	cs := mcpSession(t, a)
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if text, isErr := callTool(t, cs, "stop_arrivals", map[string]any{"stop_id": "S2"}); isErr {
+				t.Errorf("error %s", text)
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("%d OASA calls for 5 concurrent requests", calls.Load())
+	}
+}
+
+// Queued OASA work is bounded: past the cap a caller is told at once, and work whose caller left
+// is dropped, not sent, when its turn comes.
+func TestQueuedBoundedAndAbandoned(t *testing.T) {
+	var hits atomic.Int32
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("act") == "getStopArrivals" {
+			hits.Add(1)
+		}
+		w.Write([]byte("[]"))
+	}))
+	defer fake.Close()
+	a := newApp(t, monday1020)
+	a.client.BaseURL = fake.URL + "/"
+	for i := range maxQueued {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		if _, err := a.stopArrivalsQueued(ctx, fmt.Sprintf("S%d", i)); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("job %d: %v", i, err)
+		}
+		cancel()
+	}
+	start := time.Now()
+	if _, err := a.stopArrivalsQueued(context.Background(), "S9"); !errors.Is(err, errQueueFull) || time.Since(start) > time.Second {
+		t.Fatalf("past the cap: %v after %v", err, time.Since(start))
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go a.sched.Run(ctx)
+	for end := time.Now().Add(10 * time.Second); a.queuedN.Load() > 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("abandoned jobs not dropped: %d queued", a.queuedN.Load())
+		}
+	}
+	wait, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := a.stopArrivalsQueued(wait, "S1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d OASA calls; the %d abandoned jobs must not be sent", n, maxQueued)
+	}
+}
+
+// Behind a reverse proxy on localhost the public Host header is fine (the data is public anyway).
+func TestMCPHTTPBehindLocalProxy(t *testing.T) {
+	a := newApp(t, monday1020)
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}`
+	req := httptest.NewRequest("POST", "/mcp", strings.NewReader(body))
+	req.Host = "transit.example.org"
+	req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8095}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("behind a local proxy: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A client that sends the headers and then stalls the body is cut off.
+func TestMCPStalledBody(t *testing.T) {
+	old := mcpBodyTimeout
+	mcpBodyTimeout = 200 * time.Millisecond
+	defer func() { mcpBodyTimeout = old }()
+	srv := httptest.NewServer(newApp(t, monday1020).Handler())
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: 1000\r\n\r\n{\"jsonrpc\":")
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	start := time.Now()
+	status, err := bufio.NewReader(conn).ReadString('\n') // the answer comes once the server gives up on the body
+	if err != nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("stalled body: %q %v after %v", status, err, time.Since(start))
+	}
+}
+
+func TestMCPToolsAreReadOnly(t *testing.T) {
+	cs := mcpSession(t, newApp(t, monday1020))
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range res.Tools {
+		if tl.Annotations == nil || !tl.Annotations.ReadOnlyHint {
+			t.Errorf("%s: not marked read-only", tl.Name)
+		}
+	}
+}
+
+// A whole body lifts the deadline: the same keep-alive connection serves the next call later.
+func TestMCPKeepAliveAfterDeadline(t *testing.T) {
+	old := mcpBodyTimeout
+	mcpBodyTimeout = 200 * time.Millisecond
+	defer func() { mcpBodyTimeout = old }()
+	srv := httptest.NewServer(newApp(t, monday1020).Handler())
+	defer srv.Close()
+	call := func() {
+		body := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_lines","arguments":{"query":"L"}}}`
+		req, _ := http.NewRequest("POST", srv.URL+"/mcp", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Mcp-Protocol-Version", "2025-06-18")
+		res, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 200 || !strings.Contains(string(b), `\"line\":\"L\"`) {
+			t.Fatalf("%d %s", res.StatusCode, b)
+		}
+	}
+	call()
+	time.Sleep(400 * time.Millisecond)
+	call()
 }
