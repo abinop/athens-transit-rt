@@ -60,10 +60,11 @@ type Config struct {
 }
 
 type world struct {
-	feed     *gtfs.Feed
-	manifest *release.Manifest
-	matcher  *match.Matcher
-	mapper   *match.RouteMapper
+	feed      *gtfs.Feed
+	manifest  *release.Manifest
+	matcher   *match.Matcher
+	mapper    *match.RouteMapper
+	stopLines map[int32][]string // stop index -> the lines calling there
 }
 
 // lineData is the last published state of one line.
@@ -183,7 +184,7 @@ func New(cfg Config, log *slog.Logger) *App {
 // SetFeed installs a static feed (new matcher state; published results stay until replaced).
 func (a *App) SetFeed(f *gtfs.Feed, m *release.Manifest) {
 	mapper := match.NewRouteMapper(f, a.meta.Stops)
-	w := &world{feed: f, manifest: m, mapper: mapper, matcher: match.New(f, mapper, a.cfg.Matcher)}
+	w := &world{feed: f, manifest: m, mapper: mapper, matcher: match.New(f, mapper, a.cfg.Matcher), stopLines: stopLines(f)}
 	a.matchMu.Lock()
 	a.mu.Lock()
 	a.w = w
