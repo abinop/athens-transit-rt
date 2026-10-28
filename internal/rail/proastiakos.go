@@ -672,3 +672,83 @@ var mpassStationNumbers = map[string]int{
 	"6928c3c150ab5bc72b39cf14": 86,  // Αυλίδα
 	"6928c3c150ab5bc72b39cf16": 597, // Χαλκίδα
 }
+
+// SuburbanStop is one stop of a run with its scheduled time: the arrival, or the departure where
+// the board gives no arrival (the origin).
+type SuburbanStop struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	T        string  `json:"t"`
+	At       int64   `json:"at"`
+	Platform *string `json:"platform"`
+	DelayMin *int    `json:"delay_min"`
+}
+
+// SuburbanRun is one train's run of today with every stop.
+type SuburbanRun struct {
+	Train    string         `json:"train"`
+	From     string         `json:"from"`
+	To       string         `json:"to"`
+	Status   string         `json:"status"`
+	DelayMin *int           `json:"delay_min"`
+	Stops    []SuburbanStop `json:"stops"`
+}
+
+// Train returns today's run of a train number from the day's board. found is false for a number
+// with no run today (or only cancelled ones); ok is false when the board is unavailable.
+func (s *Suburban) Train(ctx context.Context, no string, now time.Time) (run *SuburbanRun, found, ok bool) {
+	b, ok := s.board(ctx, now.In(gtfs.Athens).Format(time.DateOnly))
+	if !ok {
+		return nil, false, false
+	}
+	sc := b.run(strings.TrimSpace(no), now)
+	if sc == nil {
+		return nil, false, true
+	}
+	out := &SuburbanRun{Train: strings.TrimSpace(sc.TrainNumber), To: sc.Destination.NameGreek, Status: sc.Status,
+		DelayMin: sc.Delay, Stops: make([]SuburbanStop, 0, len(sc.RouteStops))}
+	if len(sc.RouteStops) > 0 {
+		out.From = sc.RouteStops[0].NameGreek
+	}
+	for _, st := range sc.RouteStops {
+		at, ok := boardTime(st.ScheduledArrival, st.ScheduledDeparture)
+		if !ok {
+			continue
+		}
+		out.Stops = append(out.Stops, SuburbanStop{ID: st.StationID, Name: st.NameGreek, T: at.In(gtfs.Athens).Format("15:04"),
+			At: at.Unix(), Platform: st.Platform, DelayMin: st.Delay})
+	}
+	return out, true, true
+}
+
+// run picks the run of a train number for now: the one under way, else the next, else the last
+// of the day. Cancelled runs are left out.
+func (b *scheduleBoard) run(no string, now time.Time) *boardSchedule {
+	var next, last *boardSchedule
+	var nextAt, lastAt time.Time
+	for i := range b.Schedules {
+		sc := &b.Schedules[i]
+		if sc.Status == "cancelled" || strings.TrimSpace(sc.TrainNumber) != no || len(sc.RouteStops) == 0 {
+			continue
+		}
+		first, ok1 := boardTime(sc.RouteStops[0].ScheduledDeparture, sc.RouteStops[0].ScheduledArrival)
+		end := sc.RouteStops[len(sc.RouteStops)-1]
+		final, ok2 := boardTime(end.ScheduledArrival, end.ScheduledDeparture)
+		if !ok1 || !ok2 {
+			continue
+		}
+		if !now.Before(first) && !now.After(final) {
+			return sc
+		}
+		if first.After(now) && (next == nil || first.Before(nextAt)) {
+			next, nextAt = sc, first
+		}
+		if last == nil || final.After(lastAt) {
+			last, lastAt = sc, final
+		}
+	}
+	if next != nil {
+		return next
+	}
+	return last
+}

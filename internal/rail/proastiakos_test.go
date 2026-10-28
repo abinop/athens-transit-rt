@@ -385,3 +385,61 @@ func TestGetJSONBodyCap(t *testing.T) {
 		t.Fatalf("oversized document: %v", err)
 	}
 }
+
+func TestSuburbanTrain(t *testing.T) {
+	s, _, f := newTestSuburban(t)
+	at := func(hh, mm int) int64 { return time.Date(2026, 10, 28, hh, mm, 0, 0, gtfs.Athens).Unix() }
+	got, found, ok := s.Train(context.Background(), "2539", suburbanNow)
+	if !ok || !found {
+		t.Fatalf("found %v ok %v", found, ok)
+	}
+	want := &SuburbanRun{Train: "2539", From: "Πειραιάς", To: "Κιάτο", Status: "scheduled", DelayMin: intPtr(2), Stops: []SuburbanStop{
+		{ID: "ST-PIR", Name: "Πειραιάς", T: "05:20", At: at(5, 20)},
+		{ID: "ST-REN", Name: "Ρέντης", T: "05:26", At: at(5, 26), Platform: strPtr("3"), DelayMin: intPtr(4)},
+		{ID: "ST-KIA", Name: "Κιάτο", T: "06:30", At: at(6, 30)},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+	for _, no := range []string{"1203", "9999"} { // cancelled, unknown
+		if _, found, ok := s.Train(context.Background(), no, suburbanNow); !ok || found {
+			t.Errorf("%s: found %v ok %v", no, found, ok)
+		}
+	}
+	if n := f.count("/api/public/schedule-board"); n != 1 {
+		t.Errorf("board fetched %d times", n)
+	}
+	f.setFail(true)
+	s2, _, f2 := newTestSuburban(t)
+	f2.setFail(true)
+	if _, _, ok := s2.Train(context.Background(), "2539", suburbanNow); ok {
+		t.Error("ok without a board")
+	}
+}
+
+func TestSuburbanTrainPicksTheRunOfNow(t *testing.T) {
+	b := &scheduleBoard{Schedules: []boardSchedule{
+		{TrainNumber: "7", Status: "completed", RouteStops: []boardStop{
+			{StationID: "A", ScheduledDeparture: "2026-10-28T03:00:00Z"}, {StationID: "B", ScheduledArrival: "2026-10-28T03:30:00Z"}}},
+		{TrainNumber: "7 ", Status: "in_progress", RouteStops: []boardStop{
+			{StationID: "B", ScheduledDeparture: "2026-10-28T04:00:00Z"}, {StationID: "A", ScheduledArrival: "2026-10-28T04:30:00Z"}}},
+		{TrainNumber: "7", Status: "scheduled", RouteStops: []boardStop{
+			{StationID: "A", ScheduledDeparture: "2026-10-28T05:00:00Z"}, {StationID: "B", ScheduledArrival: "2026-10-28T05:30:00Z"}}},
+	}}
+	pick := func(h, m int) string {
+		sc := b.run("7", time.Date(2026, 10, 28, h, m, 0, 0, time.UTC))
+		if sc == nil {
+			return ""
+		}
+		return sc.Status
+	}
+	if got := pick(4, 10); got != "in_progress" {
+		t.Errorf("04:10 → %s", got)
+	}
+	if got := pick(4, 45); got != "scheduled" { // between runs: the next one
+		t.Errorf("04:45 → %s", got)
+	}
+	if got := pick(6, 0); got != "scheduled" { // after the last: the last one
+		t.Errorf("06:00 → %s", got)
+	}
+}

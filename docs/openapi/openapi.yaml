@@ -672,6 +672,71 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/rail/stasy/vehicles:
+    get:
+      tags: [Rail]
+      operationId: getStasyVehicles
+      summary: Metro and tram trains running now (from the timetable)
+      description: |
+        No live data exists for the metro and tram: every train the STASY timetable runs now, with
+        the stop it left (`from`, its departure `at`) and the next one (`to`, its arrival `at`), so a
+        client moves it between them on its own clock. A train standing at a terminus is not listed.
+        `indicative` as in the departures. `Cache-Control: public, max-age=15`.
+      responses:
+        "200":
+          description: The trains, by line and trip.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StasyVehicles"
+        "503":
+          description: "`warming_up`: the timetable is not loaded yet."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/rail/stasy/trips/{id}:
+    get:
+      tags: [Rail]
+      operationId: getStasyTrip
+      summary: One metro or tram run with every stop and its time
+      description: |
+        Today's run of a trip of `/v1/rail/stasy/vehicles` (yesterday's, while an overnight run is
+        still going). `Cache-Control: public, max-age=60`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The `trip` of a vehicle.
+          schema: {type: string}
+      responses:
+        "200":
+          description: The run.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StasyTrip"
+        "404":
+          description: "`unknown_trip`: no such trip, or it does not run today."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503":
+          description: "`warming_up`: the timetable is not loaded yet."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /v1/rail/suburban/stations:
     get:
       tags: [Rail]
@@ -708,7 +773,8 @@ paths:
       summary: Next suburban trains of a station (live)
       description: |
         From railway.gov.gr, with the ose.mpass station screens as fallback; boards cached 10 min.
-        `Cache-Control: public, max-age=60`.
+        While the train stream is open (see `/v1/rail/suburban/vehicles`), `delay_min` is the live
+        delay of the train. `Cache-Control: public, max-age=60`.
       parameters:
         - name: id
           in: path
@@ -799,6 +865,74 @@ paths:
         "404":
           description: No such line (GitHub Pages HTML error page).
 
+  /v1/rail/suburban/vehicles:
+    get:
+      tags: [Rail]
+      operationId: getSuburbanVehicles
+      summary: Trains in service with their GPS positions (live)
+      description: |
+        From railway.gov.gr's train tracker stream, which the server reads only while clients ask
+        (it closes 3 min after the last request). The positions come about once a second and are
+        about 10 s old at the source; `position_at` is the time of each fix. Locomotives with no run
+        are left out. Every corridor of Greece is listed, not only Attica. The first request after a
+        quiet spell gets `503 warming_up` for a few seconds. `Cache-Control: public, max-age=5`.
+      responses:
+        "200":
+          description: The trains, by train number.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuburbanVehicles"
+        "503":
+          description: "`warming_up`: no snapshot yet (or the last one is over 2 min old)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/rail/suburban/trains/{no}:
+    get:
+      tags: [Rail]
+      operationId: getSuburbanTrain
+      summary: Today's run of a train with every stop and its time
+      description: |
+        From the day's board (cached 10 min): the run under way, else the next, else the last of the
+        day. `t` is the scheduled arrival (the departure at the origin). `delay_min` of the run is the
+        live delay while the stream is open. `Cache-Control: public, max-age=30`.
+      parameters:
+        - name: no
+          in: path
+          required: true
+          description: The `train` of a vehicle or departure, e.g. `1226`.
+          schema: {type: string}
+      responses:
+        "200":
+          description: The run.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/CacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuburbanRun"
+        "404":
+          description: "`unknown_train`: no run of that number today."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "502":
+          description: "`upstream_unavailable`: no board."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+
 components:
   parameters:
     LineId:
@@ -834,7 +968,7 @@ components:
       properties:
         error:
           type: string
-          enum: [unknown_line, not_found, warming_up, feed_unavailable, query_not_allowed, bad_date, internal, missing_stop, unknown_stop, upstream_unavailable]
+          enum: [unknown_line, not_found, warming_up, feed_unavailable, query_not_allowed, bad_date, internal, missing_stop, unknown_stop, unknown_trip, unknown_train, upstream_unavailable]
 
     LatLon:
       type: array
@@ -1352,6 +1486,92 @@ components:
               headsign: {type: string}
               t: {type: string, description: "`HH:MM`, may pass 24:00."}
               in_s: {type: integer, description: Seconds from now.}
+
+    StasyPlace:
+      type: object
+      required: [name, lat, lon, at]
+      properties:
+        name: {type: string}
+        lat: {type: number}
+        lon: {type: number}
+        at: {type: integer, description: "Unix seconds. Vehicle moving: `from` at its departure, `to` at its arrival. Vehicle standing at a stop: `from` and `to` are that stop, at its arrival and its departure. Trip: each stop's departure, the last stop's arrival."}
+
+    StasyVehicles:
+      type: object
+      required: [updated_at, indicative, vehicles]
+      properties:
+        updated_at: {type: integer}
+        indicative: {type: boolean}
+        vehicles:
+          type: array
+          items:
+            type: object
+            required: [trip, line, route_color, headsign, from, to]
+            properties:
+              trip: {type: string}
+              line: {type: string, example: M2}
+              route_color: {type: string}
+              headsign: {type: string}
+              from: {$ref: "#/components/schemas/StasyPlace"}
+              to: {$ref: "#/components/schemas/StasyPlace"}
+
+    StasyTrip:
+      type: object
+      required: [trip, line, route_color, headsign, stops]
+      properties:
+        trip: {type: string}
+        line: {type: string}
+        route_color: {type: string}
+        headsign: {type: string}
+        stops:
+          type: array
+          items: {$ref: "#/components/schemas/StasyPlace"}
+
+    SuburbanVehicles:
+      type: object
+      required: [updated_at, trains]
+      properties:
+        updated_at: {type: integer}
+        trains:
+          type: array
+          items:
+            type: object
+            required: [train, corridor, service, lat, lon, course, speed_kmh, delay_min, from, to, next_station, position_at]
+            properties:
+              train: {type: string}
+              corridor: {type: string, example: PIRAIR}
+              service: {type: string, example: Suburban}
+              lat: {type: number}
+              lon: {type: number}
+              course: {type: [number, "null"], description: Degrees from north.}
+              speed_kmh: {type: number}
+              delay_min: {type: [integer, "null"]}
+              from: {type: string}
+              to: {type: string}
+              next_station: {type: string}
+              position_at: {type: integer}
+
+    SuburbanRun:
+      type: object
+      required: [train, from, to, status, delay_min, stops]
+      properties:
+        train: {type: string}
+        from: {type: string}
+        to: {type: string}
+        status: {type: string}
+        delay_min: {type: [integer, "null"]}
+        stops:
+          type: array
+          items:
+            type: object
+            required: [id, name, t, at, platform, delay_min]
+            properties:
+              id: {type: string}
+              name: {type: string}
+              t: {type: string, description: "Scheduled arrival, `HH:MM` Athens local."}
+              at: {type: integer}
+              platform: {type: [string, "null"]}
+              delay_min: {type: [integer, "null"]}
 
     SuburbanStation:
       type: object

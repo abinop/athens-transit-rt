@@ -111,6 +111,7 @@ type App struct {
 
 	stasy    *rail.STASYStore
 	suburban *rail.Suburban
+	trains   *rail.TrainStream // live Proastiakos positions, read only while clients ask
 
 	starts  *runStarts // buses leaving their start: seen flags of the daily timetable
 	seenMu  sync.Mutex
@@ -171,6 +172,11 @@ func New(cfg Config, log *slog.Logger) *App {
 		// Well under the 30 s WriteTimeout of the HTTP server: the MPass fallback and the response
 		// still have to fit after a dead primary upstream.
 		HTTP: &http.Client{Timeout: 8 * time.Second}, Now: func() time.Time { return a.now() }}
+	// The stream has no end, so no client Timeout; only the wait for its headers is bounded.
+	stream := http.DefaultTransport.(*http.Transport).Clone()
+	stream.ResponseHeaderTimeout = 15 * time.Second
+	a.trains = &rail.TrainStream{BaseURL: cfg.SuburbanURL, HTTP: &http.Client{Transport: stream}, Log: log,
+		Now: func() time.Time { return a.now() }}
 	return a
 }
 
@@ -577,6 +583,7 @@ func (a *App) Run(ctx context.Context) error {
 	go a.sched.Run(ctx)
 	go a.housekeeping(ctx)
 	go a.stasy.Run(ctx)
+	go a.trains.Run(ctx)
 	a.log.Info("listening", "addr", a.cfg.Listen, "metrics", a.cfg.MetricsListen, "rps", a.pacer.BaseRPS())
 	select {
 	case <-ctx.Done():

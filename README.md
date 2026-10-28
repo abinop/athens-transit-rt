@@ -40,6 +40,8 @@ stream are not ported: the map lives in [athens-transit-map](https://github.com/
   bus's `path_speeds`, so a line's ETA follows today's traffic on shared roads.
 - Metro and tram departures from the STASY GTFS, and suburban rail (Proastiakos) live departures
   and delays.
+- Trains for a map: metro and tram placed from the STASY timetable (between two stops, with their
+  times), and the Proastiakos trains with their GPS positions from the railway.gov.gr tracker.
 - An MCP server at `/mcp` (Streamable HTTP, read-only) so assistants can ask about lines, buses,
   stops, timetables, statistics and rail ([details](docs/API.md)).
 - Tools from upstream as subcommands: `compare`, `record` (SQLite, upstream schema), `replay`
@@ -56,6 +58,7 @@ curl -s https://transit.haroldpoi.dev/v1/lines/040/schedule       # today's time
 curl -s -G https://transit.haroldpoi.dev/v1/rail/stasy/departures \
   --data-urlencode stop=ΣΥΝΤΑΓΜΑ -d n=4                         # metro/tram (stop name URL-encoded)
 curl -s https://transit.haroldpoi.dev/v1/rail/suburban/stations   # suburban rail stations
+curl -s https://transit.haroldpoi.dev/v1/rail/suburban/vehicles   # suburban trains, GPS
 ```
 
 Please ask for at most 5 lines at a time and keep the caching headers: every client shares one

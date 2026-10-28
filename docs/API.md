@@ -23,7 +23,9 @@ The list of endpoints, their parameters and response schemas is the OpenAPI 3.1 
 Live: `/v1/lines/{line_id}`, `/v1/lines/{line_id}/schedule`, `/v1/vehicles`,
 `/v1/vehicles/tiles/{z}/{x}/{y}`, `/v1/gtfs-rt/{vehicle_positions,trip_updates}.{pb,json}`,
 `/v1/status`, `/v1/stats`, `/v1/stats/days/{YYYY-MM-DD}`, `/v1/rail/stasy/departures`,
-`/v1/rail/suburban/stations`, `/v1/rail/suburban/stations/{id}/departures`, `/healthz`. Static
+`/v1/rail/stasy/vehicles`, `/v1/rail/stasy/trips/{id}`, `/v1/rail/suburban/stations`,
+`/v1/rail/suburban/stations/{id}/departures`, `/v1/rail/suburban/vehicles`,
+`/v1/rail/suburban/trains/{no}`, `/healthz`. Static
 data (line list, shapes, stops) is on GitHub Pages:
 `https://angelospk.github.io/athens-transit-rt/static/v1/lines.json` and
 `.../static/v1/lines/{line_id}.json`.
@@ -186,6 +188,24 @@ STASY GTFS (metro M1-M3, tram T6/T7) at start and checks it once a day.
 - `503 {"error":"warming_up"}` until the first load finishes, `404 {"error":"unknown_stop"}`,
   `400 {"error":"missing_stop"}`. Cached 30 s.
 
+`GET /v1/rail/stasy/vehicles` returns every metro and tram train running now by the timetable.
+STASY has no live data, so these are estimates: each train is between the stop it left (`from`,
+at its departure) and the next one (`to`, at its arrival), times in unix seconds. Move it between
+the two on your own clock. A train standing at a stop has that stop as both `from` (its arrival)
+and `to` (its departure).
+
+```json
+{"updated_at": 1793205600, "indicative": false,
+ "vehicles": [{"trip": "1012345", "line": "M2", "route_color": "#e30613", "headsign": "ΕΛΛΗΝΙΚΟ",
+               "from": {"name": "ΣΥΝΤΑΓΜΑ", "lat": 37.975, "lon": 23.735, "at": 1793205540},
+               "to": {"name": "ΑΚΡΟΠΟΛΗ", "lat": 37.969, "lon": 23.729, "at": 1793205660}}]}
+```
+
+`GET /v1/rail/stasy/trips/{id}` returns one run (`trip` of a vehicle) with every stop and its
+departure in `stops` (same fields as `from`; the last stop has its arrival). A run past midnight is yesterday's while it still runs.
+`404 {"error":"unknown_trip"}`. Both: `503 {"error":"warming_up"}` until the first load; vehicles
+cached 15 s, trips 60 s.
+
 ### Proastiakos stations and departures
 
 `GET /v1/rail/suburban/stations` lists the suburban stations with their corridors (`id`, `name`,
@@ -205,7 +225,38 @@ STASY GTFS (metro M1-M3, tram T6/T7) at start and checks it once a day.
 - The server keeps one cached board per day and serves it when railway.gov.gr fails. Without a
   cached board it falls back to the ose.mpass screen of the station, for the stations whose
   screen number is known (the Attica ones).
+- `delay_min` is the live delay of the train when the vehicles stream (below) is open, else the
+  board's (up to 10 minutes old).
 - `502 {"error":"upstream_unavailable"}` when neither source answers. Cached 60 s.
+
+`GET /v1/rail/suburban/vehicles` returns the trains in service with their last GPS position,
+from the railway.gov.gr train tracker. The server opens the tracker's stream on the first
+request and closes it 3 minutes after the last one, so the first request after a pause gets
+`503 {"error":"warming_up"}` for a few seconds. Cached 5 s.
+
+```json
+{"updated_at": 1793205600,
+ "trains": [{"train": "1226", "corridor": "PIRAIR", "service": "Suburban", "lat": 38.0487,
+             "lon": 23.7314, "course": 10.5, "speed_kmh": 80.4, "delay_min": 0,
+             "from": "Πειραιάς", "to": "Αεροδρόμιο", "next_station": "Κάτω Αχαρναί",
+             "position_at": 1793205590}]}
+```
+
+- Trains of all Greece are listed; `corridor` tells the line. Locomotives with no run are left out.
+- `position_at` is the time of the GPS fix; some fixes are minutes old. `course` is degrees from
+  north, `null` when unknown.
+
+`GET /v1/rail/suburban/trains/{no}` returns today's run of a train with every stop: the run under
+way, else the next one, else the last.
+
+```json
+{"train": "1226", "from": "Πειραιάς", "to": "Αεροδρόμιο", "status": "in_progress", "delay_min": 0,
+ "stops": [{"id": "6928c3…", "name": "Πειραιάς", "t": "17:05", "at": 1793203500,
+            "platform": "2", "delay_min": 0}]}
+```
+
+- `delay_min` of the run is the live one when the stream is open.
+- `404 {"error":"unknown_train"}`, `502 {"error":"upstream_unavailable"}`. Cached 30 s.
 
 ## Daily statistics
 

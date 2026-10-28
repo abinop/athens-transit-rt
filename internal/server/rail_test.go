@@ -1,16 +1,21 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 	"github.com/angelospk/athens-transit-rt/internal/match"
+	"github.com/angelospk/athens-transit-rt/internal/rail"
 	"github.com/angelospk/athens-transit-rt/internal/sched"
 )
 
@@ -108,6 +113,114 @@ func TestSuburbanHandlers(t *testing.T) {
 	}
 	res, body = get(t, a2, "/v1/rail/suburban/stations/ST1/departures")
 	if res.StatusCode != 502 || !strings.Contains(string(body), `"upstream_unavailable"`) {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+}
+
+// stasyApp is an App with the STASY test timetable loaded from disk, at now.
+func stasyApp(t *testing.T, now time.Time) *App {
+	t.Helper()
+	a := newAppConfig(t, now, Config{STASYURL: "http://127.0.0.1:1/none"})
+	if err := os.CopyFS(a.stasy.Dir, os.DirFS(filepath.Join("..", "rail", "testdata", "stasy"))); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Run loads the files on disk, then stops at once: no catalogue check
+	a.stasy.Run(ctx)
+	if _, ok := a.stasy.Feed(); !ok {
+		t.Fatal("stasy not loaded")
+	}
+	return a
+}
+
+func TestSTASYVehiclesHandler(t *testing.T) {
+	now := time.Date(2026, 10, 28, 10, 5, 0, 0, gtfs.Athens)
+	a := stasyApp(t, now)
+	res, body := get(t, a, "/v1/rail/stasy/vehicles")
+	if res.StatusCode != 200 || res.Header.Get("Cache-Control") != "public, max-age=15" {
+		t.Fatalf("%d %q %s", res.StatusCode, res.Header.Get("Cache-Control"), body)
+	}
+	var v rail.STASYVehicles
+	if err := json.Unmarshal(body, &v); err != nil || len(v.Vehicles) != 4 || v.UpdatedAt != now.Unix() {
+		t.Fatalf("%v %s", err, body)
+	}
+
+	res, body = get(t, a, "/v1/rail/stasy/trips/M2-1")
+	if res.StatusCode != 200 || !strings.Contains(string(body), `"stops":[{"name":"ΣΥΝΤΑΓΜΑ"`) {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+	res, body = get(t, a, "/v1/rail/stasy/trips/nope")
+	if res.StatusCode != 404 || !strings.Contains(string(body), `"unknown_trip"`) {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+
+	cold := newAppConfig(t, now, Config{})
+	for _, path := range []string{"/v1/rail/stasy/vehicles", "/v1/rail/stasy/trips/M2-1"} {
+		if res, body := get(t, cold, path); res.StatusCode != 503 || !strings.Contains(string(body), `"warming_up"`) {
+			t.Fatalf("%s: %d %s", path, res.StatusCode, body)
+		}
+	}
+}
+
+func TestSuburbanLiveHandlers(t *testing.T) {
+	positions := `{"positions":[{"trainNumber":"2539","scheduleId":"s1","serviceType":"Suburban","origin":"Πειραιάς",` +
+		`"destination":"Κιάτο","nextStation":"Λεύκα","delay":7,"corridor":"KIATO","lat":37.95,"lng":23.64,"speed":40,` +
+		`"course":300,"hasCourse":true,"timestamp":"2026-10-05T07:19:50Z"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/public/corridor-stations":
+			io.WriteString(w, suburbanStationsBody)
+		case "/api/public/schedule-board":
+			io.WriteString(w, suburbanBoardBody)
+		case "/api/train-stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "event: trainPositionsUx\ndata: "+positions+"\n\n")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	a := newAppConfig(t, monday1020, Config{SuburbanURL: srv.URL})
+
+	// Before the stream runs, and before a client asks, there is no snapshot.
+	res, body := get(t, a, "/v1/rail/suburban/vehicles")
+	if res.StatusCode != 503 || !strings.Contains(string(body), `"warming_up"`) {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+	// Without the stream the board's own delay is kept.
+	if _, body := get(t, a, "/v1/rail/suburban/stations/ST1/departures"); !strings.Contains(string(body), `"delay_min":0`) {
+		t.Fatalf("board delay: %s", body)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.trains.Run(ctx)
+	a.trains.Vehicles() // the request above woke it before Run listened; this one is heard
+	deadline := time.Now().Add(3 * time.Second)
+	for res.StatusCode != 200 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		res, body = get(t, a, "/v1/rail/suburban/vehicles")
+	}
+	if res.StatusCode != 200 || maxAge(t, res) != suburbanVehAge {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+	var v rail.SuburbanVehicles
+	if err := json.Unmarshal(body, &v); err != nil || len(v.Trains) != 1 || v.Trains[0].Train != "2539" || v.Trains[0].Next != "Λεύκα" {
+		t.Fatalf("%v %s", err, body)
+	}
+
+	// The live delay replaces the board's, in the departures and in the train's run.
+	if _, body := get(t, a, "/v1/rail/suburban/stations/ST1/departures"); !strings.Contains(string(body), `"delay_min":7`) {
+		t.Fatalf("departures: %s", body)
+	}
+	res, body = get(t, a, "/v1/rail/suburban/trains/2539")
+	if res.StatusCode != 200 || maxAge(t, res) != suburbanTrainAge || !strings.Contains(string(body), `"delay_min":7,"stops":[{"id":"ST1","name":"Πειραιάς","t":"10:20"`) {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+	res, body = get(t, a, "/v1/rail/suburban/trains/0000")
+	if res.StatusCode != 404 || !strings.Contains(string(body), `"unknown_train"`) {
 		t.Fatalf("%d %s", res.StatusCode, body)
 	}
 }

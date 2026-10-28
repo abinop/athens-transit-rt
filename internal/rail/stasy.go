@@ -42,6 +42,7 @@ type STASYRoute struct {
 // STASYStop is one stop. Feeds list one entry per platform; a station name covers many.
 type STASYStop struct {
 	ID, Name string
+	Lat, Lon float64
 }
 
 // STASYDeparture is one next departure at a stop.
@@ -68,6 +69,8 @@ type STASY struct {
 	stopIdx    map[string]int32
 	byName     map[string][]int32 // folded stop name -> stop indices
 	trips      []stasyTrip
+	tripIdx    map[string]int32
+	tripStops  [][]stasyStopTime    // per trip, in stop_sequence order
 	byStop     map[int32][]stasyRow // stop index -> its stop_times rows
 	services   []stasyService
 	serviceIdx map[string]int32
@@ -75,9 +78,17 @@ type STASY struct {
 }
 
 type stasyTrip struct {
+	ID       string
 	Route    int32
 	Service  int32
 	Headsign string
+}
+
+// stasyStopTime is one stop of a trip (the trip's own list; byStop is the same rows by stop).
+type stasyStopTime struct {
+	Stop int32
+	A, T int32 // arrival and departure, seconds after midnight of the service day
+	seq  int32
 }
 
 type stasyRow struct {
@@ -252,7 +263,9 @@ func ParseSTASY(dir string) (*STASY, error) {
 	if err := eachRow(filepath.Join(dir, "stops.txt"), func(t *csvTable) error {
 		i := int32(len(s.Stops))
 		s.stopIdx[t.get("stop_id")] = i
-		s.Stops = append(s.Stops, STASYStop{ID: t.get("stop_id"), Name: strings.TrimSpace(t.get("stop_name"))})
+		lat, _ := strconv.ParseFloat(strings.TrimSpace(t.get("stop_lat")), 64)
+		lon, _ := strconv.ParseFloat(strings.TrimSpace(t.get("stop_lon")), 64)
+		s.Stops = append(s.Stops, STASYStop{ID: t.get("stop_id"), Name: strings.TrimSpace(t.get("stop_name")), Lat: lat, Lon: lon})
 		k := Fold(s.Stops[i].Name)
 		s.byName[k] = append(s.byName[k], i)
 		return nil
@@ -260,13 +273,14 @@ func ParseSTASY(dir string) (*STASY, error) {
 		return nil, err
 	}
 	tripIdx := map[string]int32{}
+	s.tripIdx = tripIdx
 	if err := eachRow(filepath.Join(dir, "trips.txt"), func(t *csvTable) error {
 		route, ok := routeIdx[t.get("route_id")]
 		if !ok {
 			return nil // a trip of a route the feed does not list
 		}
 		tripIdx[t.get("trip_id")] = int32(len(s.trips))
-		s.trips = append(s.trips, stasyTrip{Route: route, Service: s.service(t.get("service_id")),
+		s.trips = append(s.trips, stasyTrip{ID: t.get("trip_id"), Route: route, Service: s.service(t.get("service_id")),
 			Headsign: strings.TrimSpace(t.get("trip_headsign"))})
 		return nil
 	}); err != nil {
@@ -315,6 +329,7 @@ func ParseSTASY(dir string) (*STASY, error) {
 	}
 	// STASY leaves trip_headsign empty on most trips, so the headsign is taken from the last
 	// stop of the trip: that is the name a passenger reads on the platform.
+	s.tripStops = make([][]stasyStopTime, len(s.trips))
 	lastStop := make([]int32, len(s.trips))
 	lastSeq := make([]int32, len(s.trips))
 	hasStop := make([]bool, len(s.trips))
@@ -352,12 +367,23 @@ func ParseSTASY(dir string) (*STASY, error) {
 			return fmt.Errorf("stop_times: trip %s: %w", t.get("trip_id"), err)
 		}
 		s.byStop[si] = append(s.byStop[si], stasyRow{Trip: ti, Dep: dep})
+		// The trains stand 10-45 s at most stops: arrival and departure differ on most rows.
+		arr := dep
+		if v := t.get("arrival_time"); strings.TrimSpace(v) != "" {
+			if a, err := gtfs.ParseHMS(v); err == nil && a <= dep {
+				arr = a
+			}
+		}
+		s.tripStops[ti] = append(s.tripStops[ti], stasyStopTime{Stop: si, A: arr, T: dep, seq: seq})
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 	if len(s.trips) == 0 || len(s.Stops) == 0 {
 		return nil, fmt.Errorf("stasy: no trips or stops in %s", dir)
+	}
+	for _, st := range s.tripStops {
+		sort.SliceStable(st, func(a, b int) bool { return st[a].seq < st[b].seq })
 	}
 	for i := range s.trips {
 		if s.trips[i].Headsign == "" && hasStop[i] {
