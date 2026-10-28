@@ -463,8 +463,9 @@ func (s *Scheduler) pickLine() *request {
 func (s *Scheduler) execute(ctx context.Context, r *request) {
 	start := time.Now()
 	if r.bg != nil {
-		err := r.bg(ctx)
-		s.slots.Report(time.Since(start), err)
+		// Only its errors: a background answer (a daily schedule) is big and slow by nature, and
+		// its latency counted as load kept the pace at its slowest while the prefetch ran.
+		s.slots.Report(0, r.bg(ctx))
 		return
 	}
 	vs, err := s.fetch.BusLocations(ctx, r.route.Code)

@@ -527,3 +527,29 @@ func TestSubmitFirstJumpsTheQueue(t *testing.T) {
 		t.Fatalf("order %q", got)
 	}
 }
+
+type reportSlots struct {
+	fakeSlots
+	got []time.Duration
+	errs int
+}
+
+func (r *reportSlots) Report(d time.Duration, err error) {
+	r.got = append(r.got, d)
+	if err != nil {
+		r.errs++
+	}
+}
+
+// A background job (a daily schedule is a big answer, slow by nature) must not slow the line polls
+// down by its latency; its errors still count.
+func TestBackgroundLatencyIsNotLoad(t *testing.T) {
+	slots := &reportSlots{}
+	s := New(DefaultConfig(), slots, &fakeFetch{}, func(LinePoll) {})
+	slow := func(context.Context) error { time.Sleep(20 * time.Millisecond); return nil }
+	s.execute(context.Background(), &request{bg: slow})
+	s.execute(context.Background(), &request{bg: func(context.Context) error { return fmt.Errorf("boom") }})
+	if len(slots.got) != 2 || slots.got[0] != 0 || slots.got[1] != 0 || slots.errs != 1 {
+		t.Fatalf("reports %v errors %d", slots.got, slots.errs)
+	}
+}
