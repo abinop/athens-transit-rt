@@ -111,6 +111,10 @@ type App struct {
 	seenMu  sync.Mutex
 	seen    map[string]bool // trips the matcher has assigned a vehicle to, today
 	seenDay string
+
+	daily      func(ctx context.Context, lineCode string) (telematics.DailySchedule, error)
+	dailyMu    sync.Mutex // guards dailyCache only; never held during a request
+	dailyCache map[string]dailyEntry
 }
 
 func New(cfg Config, log *slog.Logger) *App {
@@ -126,6 +130,7 @@ func New(cfg Config, log *slog.Logger) *App {
 				IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second})
 		}
 	}
+	a.daily = a.client.DailySchedule
 	a.sched = sched.New(cfg.Sched, a.pacer, a.client, a.onLine)
 	a.meta = meta.Open(filepath.Join(cfg.StateDir, "telematics-meta.json"), a.client, a.sched.Submit,
 		func() { a.refreshLines() })

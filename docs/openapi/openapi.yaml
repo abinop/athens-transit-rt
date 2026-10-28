@@ -581,10 +581,12 @@ paths:
       operationId: getLineSchedule
       summary: Timetable of a line for one day
       description: |
-        The line's runs from the OASA GTFS, by direction and headsign: each run's departure from
-        its first stop, GTFS style (past midnight `24:10`). For today `seen` says whether a bus of
-        that run was matched. With an expired GTFS the same weekday inside the feed is used and
-        `expired` is `true`. `Cache-Control: public, max-age=60`.
+        The line's runs by direction and headsign: each run's departure from its first stop, GTFS
+        style (past midnight `24:10`). Today's timetable is OASA's daily schedule when available
+        (`source: oasa-daily`; no `seen` flags and an empty `trip` then), else the OASA GTFS
+        (`source: gtfs`), where for today `seen` says whether a bus of that run was matched. Other
+        days are always from the GTFS. With an expired GTFS the same weekday inside the feed is
+        used and `expired` is `true`. `Cache-Control: public, max-age=60`.
       parameters:
         - $ref: "#/components/parameters/LineId"
         - name: date
@@ -1298,10 +1300,14 @@ components:
 
     LineSchedule:
       type: object
-      required: [line, date, expired, directions]
+      required: [line, date, expired, source, directions]
       properties:
         line: {type: string}
         date: {type: string, format: date}
+        source:
+          type: string
+          enum: [oasa-daily, gtfs]
+          description: Where the times come from, OASA's daily schedule (today only) or the GTFS.
         expired:
           type: boolean
           description: The GTFS has expired; the times are the same weekday of the old timetable.

@@ -1,18 +1,24 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/angelospk/athens-transit-rt/internal/gtfs"
 	"github.com/angelospk/athens-transit-rt/internal/match"
 	"github.com/angelospk/athens-transit-rt/internal/rail"
+	"github.com/angelospk/athens-transit-rt/internal/telematics"
 )
 
 const (
 	scheduleMaxAge    = 60
 	scheduleDaysAhead = 7
+
+	dailyTimeout     = 8 * time.Second
+	dailyNegativeTTL = 10 * time.Minute
 )
 
 // ScheduleResponse is the /v1/lines/{id}/schedule body.
@@ -20,6 +26,7 @@ type ScheduleResponse struct {
 	Line       string              `json:"line"`
 	Date       string              `json:"date"`
 	Expired    bool                `json:"expired"`
+	Source     string              `json:"source"` // "oasa-daily" or "gtfs"
 	Directions []ScheduleDirection `json:"directions"`
 }
 
@@ -63,7 +70,104 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, minMaxAge, map[string]string{"error": "warming_up"})
 		return
 	}
-	writeJSON(w, http.StatusOK, scheduleMaxAge, a.lineSchedule(w0.feed, line, date))
+	if date.Equal(today) {
+		if d, ok := a.dailyOfLine(r.Context(), line, today); ok {
+			writeJSON(w, http.StatusOK, scheduleMaxAge, dailyToSchedule(line, date.Format(time.DateOnly), d))
+			return
+		}
+	}
+	resp := a.lineSchedule(w0.feed, line, date)
+	resp.Source = "gtfs"
+	writeJSON(w, http.StatusOK, scheduleMaxAge, resp)
+}
+
+// dailyEntry is the cached daily schedule of a line: a success lasts for its Athens day, a
+// failure (ok false) until retry.
+type dailyEntry struct {
+	day   string
+	d     telematics.DailySchedule
+	ok    bool
+	retry time.Time
+}
+
+// dailyOfLine returns OASA's schedule of today for a line: the runs of all its line codes
+// merged. ok is false when there is none (OASA down, empty, no line code): use the GTFS then.
+func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (telematics.DailySchedule, bool) {
+	day := today.Format(time.DateOnly)
+	now := a.now()
+	a.dailyMu.Lock()
+	e, cached := a.dailyCache[line]
+	a.dailyMu.Unlock()
+	if cached && e.day == day && (e.ok || now.Before(e.retry)) {
+		return e.d, e.ok
+	}
+	var codes []string
+	seen := map[string]bool{}
+	for _, ref := range a.meta.LineRoutes()[line] {
+		if ref.LineCode != "" && !seen[ref.LineCode] {
+			seen[ref.LineCode] = true
+			codes = append(codes, ref.LineCode)
+		}
+	}
+	var merged telematics.DailySchedule
+	for _, code := range codes {
+		cctx, cancel := context.WithTimeout(ctx, dailyTimeout)
+		d, err := a.daily(cctx, code)
+		cancel()
+		if err != nil {
+			a.log.Warn("daily schedule", "line_code", code, "err", err)
+			continue
+		}
+		if merged.Descr == "" {
+			merged.Descr = d.Descr
+		}
+		merged.Circular = merged.Circular || d.Circular
+		merged.Go = append(merged.Go, d.Go...)
+		merged.Come = append(merged.Come, d.Come...)
+	}
+	sort.Strings(merged.Go)
+	sort.Strings(merged.Come)
+	ok := len(merged.Go)+len(merged.Come) > 0
+	if !ok && ctx.Err() != nil {
+		return telematics.DailySchedule{}, false // the client left: not OASA's fault, do not cache
+	}
+	e = dailyEntry{day: day, d: merged, ok: ok, retry: now.Add(dailyNegativeTTL)}
+	a.dailyMu.Lock()
+	if a.dailyCache == nil {
+		a.dailyCache = map[string]dailyEntry{}
+	}
+	a.dailyCache[line] = e
+	a.dailyMu.Unlock()
+	return merged, ok
+}
+
+// dailyToSchedule shapes OASA's daily schedule like the GTFS timetable: the Go runs are
+// direction 0 (headsign: the last place of the description), the Come runs direction 1
+// (headsign: the first place). Seen flags and trip ids do not exist for these runs.
+func dailyToSchedule(line, date string, d telematics.DailySchedule) ScheduleResponse {
+	resp := ScheduleResponse{Line: line, Date: date, Source: "oasa-daily", Directions: []ScheduleDirection{}}
+	deps := func(ts []string) []ScheduleDeparture {
+		out := make([]ScheduleDeparture, len(ts))
+		for i, t := range ts {
+			out[i] = ScheduleDeparture{T: t}
+		}
+		return out
+	}
+	if len(d.Go) > 0 {
+		head := d.Descr
+		if i := strings.LastIndex(head, " - "); i >= 0 {
+			head = head[i+3:]
+		}
+		resp.Directions = append(resp.Directions, ScheduleDirection{Direction: 0, Headsign: head, Departures: deps(d.Go)})
+	}
+	if len(d.Come) > 0 {
+		head := d.Descr
+		if i := strings.Index(head, " - "); i >= 0 {
+			head = head[:i]
+		}
+		resp.Directions = append(resp.Directions, ScheduleDirection{Direction: 1, Headsign: head, Departures: deps(d.Come)})
+	}
+	return resp
 }
 
 // lineSchedule lists the trips of a line that run on a local day, by direction and headsign. With
