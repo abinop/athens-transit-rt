@@ -18,8 +18,10 @@ const (
 	scheduleMaxAge    = 60
 	scheduleDaysAhead = 7
 
-	dailyTimeout     = 8 * time.Second
-	dailyNegativeTTL = 10 * time.Minute
+	dailyTimeout = 8 * time.Second
+	// dailyPrefetchTimeout bounds one line of the prefetch: its calls wait for background slots.
+	dailyPrefetchTimeout = 2 * time.Minute
+	dailyNegativeTTL     = 10 * time.Minute
 )
 
 // ScheduleResponse is the /v1/lines/{id}/schedule body.
@@ -92,6 +94,9 @@ type dailyEntry struct {
 	retry   time.Time
 }
 
+// dailyFunc asks OASA for the daily schedule of one line code.
+type dailyFunc func(ctx context.Context, lineCode string) (telematics.DailySchedule, error)
+
 // dailyCall is a fetch in flight: requests that miss the cache meanwhile wait for it.
 type dailyCall struct {
 	done chan struct{}
@@ -101,6 +106,12 @@ type dailyCall struct {
 // dailyOfLine returns OASA's schedule of today for a line: the runs of all its line codes
 // merged. ok is false when there is none (OASA down, empty, no line code): use the GTFS then.
 func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (telematics.DailySchedule, bool) {
+	return a.dailyVia(ctx, line, today, a.daily, dailyTimeout)
+}
+
+// dailyVia is dailyOfLine with the way to ask OASA (urgent for a request, background for the
+// prefetch) and the time all the line's codes may take.
+func (a *App) dailyVia(ctx context.Context, line string, today time.Time, get dailyFunc, timeout time.Duration) (telematics.DailySchedule, bool) {
 	day := today.Format(time.DateOnly)
 	now := a.now()
 	a.dailyMu.Lock()
@@ -129,7 +140,7 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 
 	// The fetch outlives the request that started it: the others wait for it, and the cache
 	// must not keep a timetable cut short by one client leaving.
-	c.e = a.fetchDaily(context.WithoutCancel(ctx), line, day, now)
+	c.e = a.fetchDaily(context.WithoutCancel(ctx), line, day, now, get, timeout)
 
 	a.dailyMu.Lock()
 	if a.dailyCache == nil {
@@ -143,7 +154,7 @@ func (a *App) dailyOfLine(ctx context.Context, line string, today time.Time) (te
 }
 
 // fetchDaily asks OASA for each line code of the line, with no lock held.
-func (a *App) fetchDaily(ctx context.Context, line, day string, now time.Time) dailyEntry {
+func (a *App) fetchDaily(ctx context.Context, line, day string, now time.Time, get dailyFunc, timeout time.Duration) dailyEntry {
 	// All codes at once under one deadline: each waits for its own scheduler slot.
 	codes := a.meta.LineCodes(line)
 	type answer struct {
@@ -151,13 +162,13 @@ func (a *App) fetchDaily(ctx context.Context, line, day string, now time.Time) d
 		err error
 	}
 	answers := make([]answer, len(codes))
-	cctx, cancel := context.WithTimeout(ctx, dailyTimeout)
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	var wg sync.WaitGroup
 	for i, code := range codes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			d, err := a.daily(cctx, code)
+			d, err := get(cctx, code)
 			answers[i] = answer{d, err}
 		}()
 	}

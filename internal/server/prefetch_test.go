@@ -13,7 +13,7 @@ import (
 // Every line's daily timetable is fetched ahead through the background queue, so a stop with 26
 // lines (or an MCP question) finds it cached instead of queueing 40 OASA calls at once (QA Q11).
 func TestPrefetchDailyFillsTheCache(t *testing.T) {
-	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R2", LineID: "M"}},
+	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "608"}, {LineCode: "R2", LineID: "040"}},
 		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}})
 	var bg, urgent atomic.Int32
 	a.dailyBg = func(_ context.Context, code string) (telematics.DailySchedule, error) {
@@ -30,7 +30,7 @@ func TestPrefetchDailyFillsTheCache(t *testing.T) {
 	if bg.Load() != 2 {
 		t.Fatalf("background calls %d, want 2 (one per line code)", bg.Load())
 	}
-	for _, l := range []string{"L", "M"} {
+	for _, l := range []string{"608", "040"} {
 		_, body := get(t, a, "/v1/lines/"+l+"/schedule")
 		var s ScheduleResponse
 		if err := json.Unmarshal(body, &s); err != nil || s.Source != "oasa-daily" {
@@ -48,7 +48,7 @@ func TestPrefetchDailyFillsTheCache(t *testing.T) {
 
 // A shutdown stops the prefetch between lines.
 func TestPrefetchDailyStopsWithContext(t *testing.T) {
-	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "L"}, {LineCode: "R2", LineID: "M"}},
+	a := appWithLines(t, func() time.Time { return monday1020 }, []telematics.Line{{LineCode: "R1", LineID: "608"}, {LineCode: "R2", LineID: "040"}},
 		map[string][]telematics.Route{"R1": {{RouteCode: "SH"}}, "R2": {{RouteCode: "SH2"}}})
 	ctx, cancel := context.WithCancel(context.Background())
 	var bg atomic.Int32

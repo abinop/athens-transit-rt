@@ -114,7 +114,8 @@ type App struct {
 	seen    map[string]bool // trips the matcher has assigned a vehicle to, today
 	seenDay string
 
-	daily      func(ctx context.Context, lineCode string) (telematics.DailySchedule, error)
+	daily      dailyFunc  // a request waits: urgent scheduler slots, at most maxQueued
+	dailyBg    dailyFunc  // the prefetch: background slots, after the polls and the metadata
 	dailyMu    sync.Mutex // guards dailyCache only; never held during a request
 	dailyCache map[string]dailyEntry
 	dailyCalls map[string]*dailyCall // fetches in flight, by line
@@ -146,6 +147,7 @@ func New(cfg Config, log *slog.Logger) *App {
 		}
 	}
 	a.daily = a.dailyQueued
+	a.dailyBg = a.dailyBackground
 	a.stopArrivals = a.stopArrivalsQueued
 	a.sched = sched.New(cfg.Sched, a.pacer, a.client, a.onLine)
 	a.meta = meta.Open(filepath.Join(cfg.StateDir, "telematics-meta.json"), a.client, a.sched.Submit,
@@ -549,6 +551,7 @@ func (a *App) Run(ctx context.Context) error {
 		go a.dailyStats(ctx)
 		go a.typicalSpeeds(ctx)
 	}
+	go a.prefetchDaily(ctx)
 	srv := &http.Server{Addr: a.cfg.Listen, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
 	errc := make(chan error, 2)
@@ -717,6 +720,30 @@ func queued[T any](ctx context.Context, a *App, call func(ctx context.Context) (
 		return r.v, r.err
 	case <-ctx.Done():
 		return zero, ctx.Err()
+	}
+}
+
+// dailyBackground fetches OASA's daily schedule of a line code in a background slot of the
+// scheduler (FIFO with the metadata work, every few slots): no cap, the prefetch asks one at a time.
+func (a *App) dailyBackground(ctx context.Context, code string) (telematics.DailySchedule, error) {
+	type answer struct {
+		d   telematics.DailySchedule
+		err error
+	}
+	ch := make(chan answer, 1)
+	a.sched.Submit(func(sctx context.Context) error {
+		if ctx.Err() != nil {
+			return nil
+		}
+		d, err := a.client.DailySchedule(sctx, code)
+		ch <- answer{d, err}
+		return err
+	})
+	select {
+	case r := <-ch:
+		return r.d, r.err
+	case <-ctx.Done():
+		return telematics.DailySchedule{}, ctx.Err()
 	}
 }
 
