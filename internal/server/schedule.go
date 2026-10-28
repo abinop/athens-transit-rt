@@ -75,7 +75,9 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if date.Equal(today) {
 		if d, ok := a.dailyOfLine(r.Context(), line, today); ok {
-			writeJSON(w, http.StatusOK, scheduleMaxAge, dailyToSchedule(line, date.Format(time.DateOnly), d))
+			resp := dailyToSchedule(line, date.Format(time.DateOnly), d)
+			a.markDailySeen(w0.feed, line, &resp, today)
+			writeJSON(w, http.StatusOK, scheduleMaxAge, resp)
 			return
 		}
 	}
@@ -327,4 +329,5 @@ func (a *App) forgetSeen() {
 	a.seenMu.Lock()
 	a.seen, a.seenDay = map[string]bool{}, ""
 	a.seenMu.Unlock()
+	a.starts.forget()
 }
