@@ -45,6 +45,42 @@ stream are not ported: the map lives in [athens-transit-map](https://github.com/
 - Tools from upstream as subcommands: `compare`, `record` (SQLite, upstream schema), `replay`
   (including `--blocks`).
 
+## Use the public instance
+
+Base URL `https://transit.haroldpoi.dev`, no key. Reference with try-it:
+<https://angelospk.github.io/athens-transit-rt/>, details in [`docs/API.md`](docs/API.md).
+
+```bash
+curl -s https://transit.haroldpoi.dev/v1/lines/040                # live buses of a line
+curl -s https://transit.haroldpoi.dev/v1/lines/040/schedule       # today's timetable, seen per run
+curl -s -G https://transit.haroldpoi.dev/v1/rail/stasy/departures \
+  --data-urlencode stop=ΣΥΝΤΑΓΜΑ -d n=4                         # metro/tram (stop name URL-encoded)
+curl -s https://transit.haroldpoi.dev/v1/rail/suburban/stations   # suburban rail stations
+```
+
+Please ask for at most 5 lines at a time and keep the caching headers: every client shares one
+request budget towards OASA.
+
+### MCP (Claude, ChatGPT and other assistants)
+
+URL: `https://transit.haroldpoi.dev/mcp` (Streamable HTTP, no login, read-only). Tools: `search_lines`,
+`line_now`, `line_timetable`, `find_stops`, `stop_arrivals`, `network_day`, `metro_departures`,
+`suburban_departures` ([what each returns](docs/API.md#mcp-assistants)).
+
+- Claude Code: `claude mcp add --transport http athens-transit https://transit.haroldpoi.dev/mcp`
+- Claude (claude.ai, desktop): Settings › Connectors › Add custom connector, paste the URL.
+- ChatGPT: turn on developer mode, add a connector (MCP server) with the URL and no authentication.
+- Any client: check that it answers with
+
+  ```bash
+  curl -s https://transit.haroldpoi.dev/mcp -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  ```
+
+Then ask, for example, «Πού είναι τώρα τα λεωφορεία του 040;» or «Πότε φεύγει το επόμενο μετρό από
+το Σύνταγμα;».
+
 ## Architecture
 
 ```
