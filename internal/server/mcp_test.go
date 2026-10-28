@@ -154,3 +154,18 @@ func TestMCPHTTP(t *testing.T) {
 		t.Fatalf("initialize %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// Stateless: a tools/call needs no session from an earlier initialize.
+func TestMCPHTTPToolCall(t *testing.T) {
+	a := newApp(t, monday1020)
+	body := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"line_timetable","arguments":{"line":"L"}}}`
+	req := httptest.NewRequest("POST", "/mcp", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Protocol-Version", "2025-06-18")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `\"source\":\"gtfs\"`) {
+		t.Fatalf("tools/call %d %s", rec.Code, rec.Body.String())
+	}
+}
