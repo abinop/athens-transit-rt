@@ -17,7 +17,7 @@ import (
 const (
 	CellM       = 100.0            // cell side, metres
 	Window      = 20 * time.Minute // passes older than this are not today's traffic any more
-	MinVehicles = 2                // distinct buses a cell needs before its speed counts
+	MinVehicles = 2                // distinct buses a cell needs before its speed counts (speedAt counts to 2)
 	LiveWeight  = 0.7              // share of the live speed when the usual one is known too
 	sectors     = 8                // heading sectors (45°): the two sides of a road are apart
 	pieceM      = 25.0             // a pass is cut into pieces this long, each to its cell
@@ -113,30 +113,23 @@ func (g *Grid) speedAt(k key, now int64) (float64, bool) {
 	defer g.mu.Unlock()
 	old := now - int64(Window.Seconds())
 	m, secs := 0.0, 0.0
-	var seen []string
+	first, two := "", false // MinVehicles is 2: one other vehicle is enough to know
 	for _, s := range g.cells[k] {
 		if s.t < old || s.t > now {
 			continue
 		}
 		m += s.m
 		secs += s.secs
-		if !contains(seen, s.vehicle) {
-			seen = append(seen, s.vehicle)
+		if first == "" {
+			first = s.vehicle
+		} else if s.vehicle != first {
+			two = true
 		}
 	}
-	if len(seen) < MinVehicles || secs <= 0 {
+	if !two || secs <= 0 {
 		return 0, false
 	}
 	return m / secs, true
-}
-
-func contains(xs []string, x string) bool {
-	for _, y := range xs {
-		if y == x {
-			return true
-		}
-	}
-	return false
 }
 
 // Prune drops passes older than Window and the cells left empty.
