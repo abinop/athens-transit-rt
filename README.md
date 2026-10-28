@@ -33,6 +33,15 @@ stream are not ported: the map lives in [athens-transit-map](https://github.com/
   usage: [API reference](https://angelospk.github.io/athens-transit-rt/),
   [`docs/API.md`](docs/API.md). The feeds pass the MobilityData GTFS Realtime validator
   with 0 errors ([details](docs/API.md#validation)).
+- Line timetables (`/v1/lines/{id}/schedule`): today from OASA's daily schedule, prefetched once a
+  day for every line, with `seen` per run from the buses seen leaving their start; other days from
+  the GTFS.
+- Live road speeds: the recent passes of every line per 100 m piece of road, blended into each
+  bus's `path_speeds`, so a line's ETA follows today's traffic on shared roads.
+- Metro and tram departures from the STASY GTFS, and suburban rail (Proastiakos) live departures
+  and delays.
+- An MCP server at `/mcp` (Streamable HTTP, read-only) so assistants can ask about lines, buses,
+  stops, timetables, statistics and rail ([details](docs/API.md)).
 - Tools from upstream as subcommands: `compare`, `record` (SQLite, upstream schema), `replay`
   (including `--blocks`).
 

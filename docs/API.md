@@ -138,19 +138,28 @@ default. `?date=YYYY-MM-DD` reads another day, up to 7 days ahead.
 
 ```json
 {
-  "line": "040", "date": "2026-10-28", "expired": false,
+  "line": "040", "date": "2026-10-28", "expired": false, "source": "oasa-daily",
   "directions": [
     {"direction": 0, "headsign": "ΠΕΙΡΑΙΑΣ",
-     "departures": [{"t": "05:30", "trip": "938_day_1_1300_0500", "seen": true}]}
+     "departures": [{"t": "05:30", "trip": "", "seen": true}]}
   ]
 }
 ```
 
+- `source`: today's timetable is OASA's daily schedule (`getDailySchedule`, `oasa-daily`) when
+  OASA answers; the server fetches every line's once a day in the background, and a request falls
+  back to the GTFS (`gtfs`) when it is not there yet. Other days are always from the GTFS.
 - `t` is the departure from the trip's first stop in GTFS style: a trip after midnight shows
   `24:10`.
-- `directions` groups the trips by `direction_id` and headsign.
-- `seen` (today only) is `true` when the matcher has assigned a vehicle to that trip since
-  midnight.
+- `directions` groups the trips by `direction_id` and headsign. `trip` is the GTFS `trip_id`
+  (empty for `oasa-daily`: the daily schedule has no trip ids).
+- `seen` (today only): did the run leave?
+  - `gtfs`: `true` when the matcher has assigned a vehicle to that trip since midnight.
+  - `oasa-daily`: `true` when a bus of the line was seen leaving the start of a shape that ends
+    where the direction does (last fix within 300 m of the start, then 600 m or more along it within
+    15 min), from 3 min before to 20 min after the run's time; each start counts for one run.
+    `false` when no bus left in that window and 20 min have passed. Missing when not known yet,
+    or when the run was due before the server started watching (after a restart).
 - `expired` is `true` when the day is outside the static GTFS validity. The trips are then those
   of the same weekday inside the feed, so the timetable may not be the one OASA runs.
 - `404 {"error":"unknown_line"}` for a line the feed does not have, `400 {"error":"bad_date"}`

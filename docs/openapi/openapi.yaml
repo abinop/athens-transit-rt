@@ -583,8 +583,9 @@ paths:
       description: |
         The line's runs by direction and headsign: each run's departure from its first stop, GTFS
         style (past midnight `24:10`). Today's timetable is OASA's daily schedule when available
-        (`source: oasa-daily`; no `seen` flags and an empty `trip` then), else the OASA GTFS
-        (`source: gtfs`), where for today `seen` says whether a bus of that run was matched. Other
+        (`source: oasa-daily`; an empty `trip` then, and for today `seen` says whether a bus was
+        seen leaving the start for that run), else the OASA GTFS (`source: gtfs`), where for today
+        `seen` says whether a bus of that run was matched. Other
         days are always from the GTFS. With an expired GTFS the same weekday inside the feed is
         used and `expired` is `true`. `Cache-Control: public, max-age=60`.
       parameters:
@@ -1327,7 +1328,12 @@ components:
                   properties:
                     t: {type: string, description: "Departure from the first stop, `HH:MM`, may pass 24:00."}
                     trip: {type: string}
-                    seen: {type: boolean, description: "Today only: a bus of this run was matched."}
+                    seen:
+                      type: boolean
+                      description: >-
+                        Today only. `gtfs`: a bus of this run was matched. `oasa-daily`: a bus of the
+                        line left the start of this direction from 3 min before to 20 min after `t`
+                        (`false` once 20 min passed without one). Missing while unknown.
 
     StasyDepartures:
       type: object
